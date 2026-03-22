@@ -2,6 +2,10 @@
 
 **[forgekv.com](https://forgekv.com)** — A Redis-compatible key-value server built in Rust, designed from the ground up for **multi-core scale-out** and **SSD-backed persistence**. Drop-in replacement for Redis — any Redis client works without changes.
 
+```bash
+docker pull forgekv/forgekv
+```
+
 ---
 
 ## Why ForgeKV?
