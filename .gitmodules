@@ -1,0 +1,3 @@
+[submodule "compat-tests"]
+	path = compat-tests
+	url = https://github.com/tair-opensource/compatibility-test-suite-for-redis

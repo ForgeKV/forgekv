@@ -1,0 +1,13 @@
+services:
+  forgekv:
+    build:
+      context: ./rust
+    ports:
+      - "6379:6379"
+    volumes:
+      - forgekv-data:/data
+    restart: unless-stopped
+
+
+volumes:
+  forgekv-data:

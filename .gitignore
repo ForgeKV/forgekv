@@ -1,0 +1,56 @@
+# Rust build artifacts
+target/
+rust/target/
+redis-compat-rs/target/
+
+# Cargo lock files (keep root, ignore nested)
+redis-compat-rs/Cargo.lock
+
+# Runtime data / storage files
+rust/data/
+data/
+*.wal
+*.sst
+*.log
+LOCK
+CURRENT
+MANIFEST-*
+
+# Redis config with local overrides
+*.conf.local
+
+# Benchmark images (generated, not source)
+*.png
+*.jpg
+*.jpeg
+
+# Python cache (compat-tests)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Python virtualenvs
+compat-tests/.venv/
+compat-tests/venv/
+compat-tests/env/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+
+# Claude Code internal
+.claude/
+.mcp.json

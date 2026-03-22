@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "redis-compat-rs",
+    "rust",
+]
+resolver = "2"
