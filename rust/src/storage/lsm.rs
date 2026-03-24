@@ -60,10 +60,12 @@ fn shard_of(key: &[u8]) -> usize {
         }
         _ => key,
     };
-    let mut h: u64 = 14695981039346656037;
+    const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     for &b in payload {
         h ^= b as u64;
-        h = h.wrapping_mul(1099511628211);
+        h = h.wrapping_mul(FNV_PRIME);
     }
     (h % NUM_SHARDS as u64) as usize
 }

@@ -22,6 +22,11 @@ impl RedisType {
     }
 }
 
+/// Serialized size of the legacy format (without version field).
+pub const METADATA_SIZE_LEGACY: usize = 33;
+/// Serialized size of the current format (with version field).
+pub const METADATA_SIZE_CURRENT: usize = 41;
+
 pub struct RedisMetadata {
     pub r#type: RedisType,
     pub count: i64,
@@ -34,7 +39,7 @@ pub struct RedisMetadata {
 impl RedisMetadata {
     /// Serialize: [type:1][count:8LE][expiryMs:8LE][listHead:8LE][listTail:8LE][version:8LE] = 41 bytes
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(41);
+        let mut buf = Vec::with_capacity(METADATA_SIZE_CURRENT);
         buf.push(self.r#type as u8);
         buf.extend_from_slice(&self.count.to_le_bytes());
         buf.extend_from_slice(&self.expiry_ms.to_le_bytes());
@@ -51,8 +56,8 @@ impl RedisMetadata {
         let list_head = i64::from_le_bytes(data[17..25].try_into().unwrap());
         let list_tail = i64::from_le_bytes(data[25..33].try_into().unwrap());
         // Backward compatible: old format is 33 bytes, new is 41
-        let version = if data.len() >= 41 {
-            u64::from_le_bytes(data[33..41].try_into().unwrap())
+        let version = if data.len() >= METADATA_SIZE_CURRENT {
+            u64::from_le_bytes(data[METADATA_SIZE_LEGACY..METADATA_SIZE_CURRENT].try_into().unwrap())
         } else {
             1
         };

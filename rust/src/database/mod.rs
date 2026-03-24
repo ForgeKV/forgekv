@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use crate::ext_type_registry;
 use crate::storage::key_encoding::*;
 use crate::storage::LsmStorage;
-use metadata::{RedisMetadata, RedisType};
+use metadata::{RedisMetadata, RedisType, METADATA_SIZE_LEGACY};
 
 #[derive(Debug)]
 pub enum RedisError {
@@ -43,13 +43,16 @@ pub struct RedisDatabase {
     shards: Box<[RwLock<()>]>,
 }
 
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
 /// FNV-1a hash → shard index. Fast, zero allocation, excellent key distribution.
 #[inline(always)]
 fn shard_for(key: &[u8]) -> usize {
-    let mut h: u64 = 14695981039346656037;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     for b in key {
         h ^= *b as u64;
-        h = h.wrapping_mul(1099511628211);
+        h = h.wrapping_mul(FNV_PRIME);
     }
     (h as usize) % NUM_SHARDS
 }
@@ -109,7 +112,7 @@ impl RedisDatabase {
     fn get_meta_inner(&self, db: usize, key: &[u8]) -> Option<RedisMetadata> {
         let meta_key = encode_meta_key(db, key);
         let data = self.storage.get(&meta_key)?;
-        if data.len() < 33 {
+        if data.len() < METADATA_SIZE_LEGACY {
             return None;
         }
         Some(RedisMetadata::deserialize(&data))
@@ -134,13 +137,7 @@ impl RedisDatabase {
     fn is_live_key_inner(&self, db: usize, key: &[u8]) -> bool {
         match self.get_meta_inner(db, key) {
             None => false,
-            Some(meta) => {
-                if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
-                    false
-                } else {
-                    true
-                }
-            }
+            Some(meta) => !(meta.expiry_ms > 0 && meta.expiry_ms <= now_ms()),
         }
     }
 
@@ -159,17 +156,14 @@ impl RedisDatabase {
 
     fn delete_key_internal(&self, db: usize, key: &[u8], meta: Option<&RedisMetadata>) {
         let meta = match meta {
-            Some(m) => {
-                let owned = RedisMetadata {
-                    r#type: m.r#type,
-                    count: m.count,
-                    expiry_ms: m.expiry_ms,
-                    list_head: m.list_head,
-                    list_tail: m.list_tail,
-                    version: 0,
-                };
-                owned
-            }
+            Some(m) => RedisMetadata {
+                r#type: m.r#type,
+                count: m.count,
+                expiry_ms: m.expiry_ms,
+                list_head: m.list_head,
+                list_tail: m.list_tail,
+                version: 0,
+            },
             None => match self.get_meta_inner(db, key) {
                 Some(m) => m,
                 None => return,
@@ -250,13 +244,7 @@ impl RedisDatabase {
         let existing = self.get_meta_inner(db, key);
         let is_live = match &existing {
             None => false,
-            Some(m) => {
-                if m.expiry_ms > 0 && m.expiry_ms <= now_ms() {
-                    false
-                } else {
-                    true
-                }
-            }
+            Some(m) => !(m.expiry_ms > 0 && m.expiry_ms <= now_ms()),
         };
 
         if nx && is_live {
@@ -270,10 +258,6 @@ impl RedisDatabase {
         if let Some(ref m) = existing {
             if m.r#type != RedisType::String {
                 self.delete_key_internal(db, key, Some(m));
-            } else if m.expiry_ms > 0 && expiry_ms == 0 {
-                // Remove old TTL
-                let old_ttl_key = encode_ttl_key(m.expiry_ms, db, key);
-                self.storage.delete(old_ttl_key);
             } else if m.expiry_ms > 0 {
                 let old_ttl_key = encode_ttl_key(m.expiry_ms, db, key);
                 self.storage.delete(old_ttl_key);
@@ -420,7 +404,7 @@ impl RedisDatabase {
         new_val.extend_from_slice(to_append);
         let new_len = new_val.len() as i64;
 
-        let meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
+        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
             r#type: RedisType::String,
             count: 1,
             expiry_ms: 0,
@@ -428,7 +412,6 @@ impl RedisDatabase {
             list_tail: 0,
             version: 0,
         });
-        let mut meta = meta;
         meta.r#type = RedisType::String;
         meta.count = 1;
 
@@ -1692,7 +1675,7 @@ impl RedisDatabase {
         new_val[offset..offset + value.len()].copy_from_slice(value);
         let result_len = new_val.len() as i64;
 
-        let meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
+        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
             r#type: RedisType::String,
             count: 1,
             expiry_ms: 0,
@@ -1700,7 +1683,6 @@ impl RedisDatabase {
             list_tail: 0,
             version: 0,
         });
-        let mut meta = meta;
         meta.r#type = RedisType::String;
         meta.count = 1;
 
