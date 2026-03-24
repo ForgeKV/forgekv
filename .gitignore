@@ -51,6 +51,9 @@ desktop.ini
 .env
 .env.local
 
+# Playwright MCP logs
+.playwright-mcp/
+
 # Claude Code internal
 .claude/
 .mcp.json

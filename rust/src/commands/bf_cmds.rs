@@ -10,7 +10,7 @@ use crate::resp::RespValue;
 use crate::storage::bloom::BloomFilter;
 use super::CommandHandler;
 
-/// In-memory bloom filter store, keyed by (db_index, key).
+// In-memory bloom filter store, keyed by (db_index, key).
 lazy_static::lazy_static! {
     static ref BF_STORE: Mutex<HashMap<(usize, Vec<u8>), BloomFilter>> = Mutex::new(HashMap::new());
 }

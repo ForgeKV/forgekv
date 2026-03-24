@@ -1081,9 +1081,9 @@ fn handle_hello(
     authenticated: &mut bool,
     username: &mut String,
     resp_version: &mut u8,
-    client_name: &str,
+    _client_name: &str,
     client_id: u64,
-    db_index: usize,
+    _db_index: usize,
 ) -> RespValue {
     // HELLO [protover [AUTH username password] [SETNAME clientname]]
     let mut new_version = *resp_version;
@@ -1159,7 +1159,7 @@ fn handle_client_cmd(
     no_evict: &mut bool,
     no_touch: &mut bool,
     client_registry: &Arc<ClientRegistry>,
-    resp_version: u8,
+    _resp_version: u8,
 ) -> RespValue {
     if args.len() < 2 {
         return RespValue::error("ERR wrong number of arguments for 'client' command");

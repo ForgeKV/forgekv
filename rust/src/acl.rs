@@ -14,7 +14,6 @@
 ///
 /// Password storage: SHA-256 hex hash, or literal "#<hash>" prefix.
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use parking_lot::RwLock;
 
 /// Bitmask of command categories
