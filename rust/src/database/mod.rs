@@ -109,6 +109,17 @@ impl RedisDatabase {
 
     // ── Internal helpers (called while lock is held) ──────────────────────────
 
+    /// Scan all storage keys with the given prefix and delete them.
+    fn delete_all_with_prefix(&self, tag: u8, db: usize, key: &[u8]) {
+        let prefix = encode_key_prefix(tag, db, key);
+        let mut end_prefix = prefix.clone();
+        increment_last_byte(&mut end_prefix);
+        let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
+        for (k, _) in entries {
+            self.storage.delete(k);
+        }
+    }
+
     fn get_meta_inner(&self, db: usize, key: &[u8]) -> Option<RedisMetadata> {
         let meta_key = encode_meta_key(db, key);
         let data = self.storage.get(&meta_key)?;
@@ -186,44 +197,10 @@ impl RedisDatabase {
                 let sk = encode_string_key(db, key);
                 self.storage.delete(sk);
             }
-            RedisType::Hash => {
-                // Scan and delete all hash fields
-                let prefix = encode_key_prefix(TAG_HASH, db, key);
-                let mut end_prefix = prefix.clone();
-                increment_last_byte(&mut end_prefix);
-                let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
-                for (k, _) in entries {
-                    self.storage.delete(k);
-                }
-            }
-            RedisType::List => {
-                // Delete all list entries by sequence
-                let prefix = encode_key_prefix(TAG_LIST, db, key);
-                let mut end_prefix = prefix.clone();
-                increment_last_byte(&mut end_prefix);
-                let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
-                for (k, _) in entries {
-                    self.storage.delete(k);
-                }
-            }
-            RedisType::Set => {
-                let prefix = encode_key_prefix(TAG_SET, db, key);
-                let mut end_prefix = prefix.clone();
-                increment_last_byte(&mut end_prefix);
-                let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
-                for (k, _) in entries {
-                    self.storage.delete(k);
-                }
-            }
-            RedisType::ZSet => {
-                let prefix = encode_key_prefix(TAG_ZSET, db, key);
-                let mut end_prefix = prefix.clone();
-                increment_last_byte(&mut end_prefix);
-                let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
-                for (k, _) in entries {
-                    self.storage.delete(k);
-                }
-            }
+            RedisType::Hash => self.delete_all_with_prefix(TAG_HASH, db, key),
+            RedisType::List => self.delete_all_with_prefix(TAG_LIST, db, key),
+            RedisType::Set  => self.delete_all_with_prefix(TAG_SET, db, key),
+            RedisType::ZSet => self.delete_all_with_prefix(TAG_ZSET, db, key),
             RedisType::None => {}
         }
     }

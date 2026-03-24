@@ -252,6 +252,20 @@ impl LsmStorage {
         (Some(old.into_snapshot()), Some(archive))
     }
 
+    /// If a snapshot was produced by rotation, flush it to L0 and clean up the archive.
+    fn flush_if_needed(
+        &self,
+        snap: Option<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+        archive: Option<std::path::PathBuf>,
+    ) {
+        if let Some(s) = snap {
+            let _ = self.flush_snapshot_to_l0(s);
+            if let Some(path) = archive {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
     /// Batch write: group entries by shard, write each group under one WAL lock.
     /// Used by MSET and other multi-key write commands.
     pub fn put_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) {
@@ -291,10 +305,7 @@ impl LsmStorage {
         }
 
         for (snap, archive) in to_flush {
-            let _ = self.flush_snapshot_to_l0(snap);
-            if let Some(path) = archive {
-                let _ = fs::remove_file(path);
-            }
+            self.flush_if_needed(Some(snap), archive);
         }
     }
 
@@ -322,12 +333,7 @@ impl LsmStorage {
             mem.active.put(key2, val2);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        if let Some(s) = snap {
-            let _ = self.flush_snapshot_to_l0(s);
-            if let Some(path) = archive {
-                let _ = fs::remove_file(path);
-            }
-        }
+        self.flush_if_needed(snap, archive);
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
@@ -339,12 +345,7 @@ impl LsmStorage {
             mem.active.put(key, value);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        if let Some(s) = snap {
-            let _ = self.flush_snapshot_to_l0(s);
-            if let Some(path) = archive {
-                let _ = fs::remove_file(path);
-            }
-        }
+        self.flush_if_needed(snap, archive);
     }
 
     pub fn delete(&self, key: Vec<u8>) {
@@ -356,12 +357,7 @@ impl LsmStorage {
             mem.active.delete(key);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        if let Some(s) = snap {
-            let _ = self.flush_snapshot_to_l0(s);
-            if let Some(path) = archive {
-                let _ = fs::remove_file(path);
-            }
-        }
+        self.flush_if_needed(snap, archive);
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
