@@ -148,7 +148,7 @@ impl RedisDatabase {
     fn is_live_key_inner(&self, db: usize, key: &[u8]) -> bool {
         match self.get_meta_inner(db, key) {
             None => false,
-            Some(meta) => !(meta.expiry_ms > 0 && meta.expiry_ms <= now_ms()),
+            Some(meta) => !meta.is_expired_at(now_ms()),
         }
     }
 
@@ -221,7 +221,7 @@ impl RedisDatabase {
         let existing = self.get_meta_inner(db, key);
         let is_live = match &existing {
             None => false,
-            Some(m) => !(m.expiry_ms > 0 && m.expiry_ms <= now_ms()),
+            Some(m) => !m.is_expired_at(now_ms()),
         };
 
         if nx && is_live {
@@ -311,7 +311,7 @@ impl RedisDatabase {
             Some(m) => m,
         };
 
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return Ok(None);
         }
 
@@ -477,7 +477,7 @@ impl RedisDatabase {
             Some(m) => m,
         };
 
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return Ok(-2);
         }
 
@@ -501,7 +501,7 @@ impl RedisDatabase {
             Some(m) => m,
         };
 
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return Ok(-2);
         }
 
@@ -522,7 +522,7 @@ impl RedisDatabase {
         match self.get_meta_inner(db, key) {
             None => Ok(-2),
             Some(m) => {
-                if m.expiry_ms > 0 && m.expiry_ms <= now_ms() { return Ok(-2); }
+                if m.is_expired_at(now_ms()) { return Ok(-2); }
                 if m.expiry_ms == 0 { return Ok(-1); }
                 Ok(m.expiry_ms / 1000)
             }
@@ -534,7 +534,7 @@ impl RedisDatabase {
         match self.get_meta_inner(db, key) {
             None => Ok(-2),
             Some(m) => {
-                if m.expiry_ms > 0 && m.expiry_ms <= now_ms() { return Ok(-2); }
+                if m.is_expired_at(now_ms()) { return Ok(-2); }
                 if m.expiry_ms == 0 { return Ok(-1); }
                 Ok(m.expiry_ms)
             }
@@ -568,9 +568,9 @@ impl RedisDatabase {
 
             // Check if expired
             if let Some(v) = &value {
-                if v.len() >= 33 {
+                if v.len() >= METADATA_SIZE_LEGACY {
                     let meta = RedisMetadata::deserialize(v);
-                    if meta.expiry_ms > 0 && meta.expiry_ms <= now {
+                    if meta.is_expired_at(now) {
                         continue;
                     }
                 }
@@ -660,9 +660,9 @@ impl RedisDatabase {
             }
             let user_key = encoded_key[4..4 + key_len].to_vec();
 
-            if value.len() >= 33 {
+            if value.len() >= METADATA_SIZE_LEGACY {
                 let meta = RedisMetadata::deserialize(&value);
-                if meta.expiry_ms > 0 && meta.expiry_ms <= now {
+                if meta.is_expired_at(now) {
                     continue;
                 }
             }
@@ -695,7 +695,7 @@ impl RedisDatabase {
             Some(m) => m,
         };
 
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return Ok("none");
         }
 
@@ -712,7 +712,7 @@ impl RedisDatabase {
     pub fn key_count(&self, db: usize, key: &[u8]) -> Option<i64> {
         let _guard = self.shard_r(key);
         let meta = self.get_meta_inner(db, key)?;
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return None;
         }
         Some(meta.count)
@@ -721,7 +721,7 @@ impl RedisDatabase {
     pub fn key_version(&self, db: usize, key: &[u8]) -> Option<u64> {
         let _guard = self.shard_r(key);
         let meta = self.get_meta_inner(db, key)?;
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             return None;
         }
         Some(meta.version)
@@ -755,7 +755,7 @@ impl RedisDatabase {
         for key in &all_keys {
             let meta_key = encode_meta_key(db, key);
             if let Some(data) = self.storage.get(&meta_key) {
-                if data.len() >= 33 {
+                if data.len() >= METADATA_SIZE_LEGACY {
                     let meta = RedisMetadata::deserialize(&data);
                     if meta.expiry_ms > 0 && meta.expiry_ms > now {
                         expires += 1;
@@ -850,7 +850,7 @@ impl RedisDatabase {
             return Err(RedisError::WrongType);
         }
 
-        if meta.expiry_ms > 0 && meta.expiry_ms <= now_ms() {
+        if meta.is_expired_at(now_ms()) {
             // Key expired, reset
             meta = RedisMetadata {
                 r#type: RedisType::Hash,
@@ -1685,7 +1685,7 @@ impl RedisDatabase {
         let existing = self.get_meta_inner(db, key);
         let is_live = match &existing {
             None => false,
-            Some(m) => !(m.expiry_ms > 0 && m.expiry_ms <= now_ms()),
+            Some(m) => !m.is_expired_at(now_ms()),
         };
 
         // Get old value if string type
@@ -1754,7 +1754,7 @@ impl RedisDatabase {
         match self.get_meta_inner(db, key) {
             None => Ok(-2),
             Some(m) => {
-                if m.expiry_ms > 0 && m.expiry_ms <= now_ms() {
+                if m.is_expired_at(now_ms()) {
                     Ok(-2)
                 } else {
                     Ok(m.expiry_ms)
@@ -3635,7 +3635,7 @@ impl RedisDatabase {
             if db < self.num_dbs {
                 // Check if still expired (double-check)
                 if let Some(meta) = self.get_meta_inner(db, &key) {
-                    if meta.expiry_ms > 0 && meta.expiry_ms <= now {
+                    if meta.is_expired_at(now) {
                         self.delete_key_internal(db, &key, Some(&meta));
                     }
                 }

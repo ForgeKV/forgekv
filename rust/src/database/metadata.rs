@@ -37,6 +37,11 @@ pub struct RedisMetadata {
 }
 
 impl RedisMetadata {
+    /// Returns true if this key has a TTL set and it has already passed.
+    pub fn is_expired_at(&self, now_ms: i64) -> bool {
+        self.expiry_ms > 0 && self.expiry_ms <= now_ms
+    }
+
     /// Serialize: [type:1][count:8LE][expiryMs:8LE][listHead:8LE][listTail:8LE][version:8LE] = 41 bytes
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(METADATA_SIZE_CURRENT);
