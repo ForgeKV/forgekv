@@ -33,9 +33,9 @@ struct FlushPlan {
 
 pub struct LsmStorage {
     data_dir: PathBuf,
-    /// 64 independent memtable shards — each has its own write lock.
+    /// 256 independent memtable shards — each has its own write lock.
     mem_shards: Box<[RwLock<MemShard>]>,
-    /// 64 WAL files — one per shard, eliminating cross-shard WAL contention.
+    /// 256 WAL files — one per shard, eliminating cross-shard WAL contention.
     wals: Box<[Mutex<WriteAheadLog>]>,
     wal_seq: Arc<AtomicU64>,
     manifest: Arc<Manifest>,
@@ -121,7 +121,7 @@ impl LsmStorage {
             .collect::<io::Result<Vec<_>>>()?;
         let wals = wals.into_boxed_slice();
 
-        // Build 64 memtable shards, replaying recovered entries into them.
+        // Build 256 memtable shards, replaying recovered entries into them.
         let mem_shards: Vec<RwLock<MemShard>> = (0..NUM_SHARDS)
             .map(|_| {
                 RwLock::new(MemShard {
