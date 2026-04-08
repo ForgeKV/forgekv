@@ -1,14 +1,13 @@
 /// Bloom Filter commands — compatible with RedisBloom / Dragonfly.
 ///
 /// Commands: BF.ADD BF.MADD BF.EXISTS BF.MEXISTS BF.RESERVE BF.CARD BF.INFO BF.INSERT BF.LOADCHUNK BF.SCANDUMP
-
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+use super::CommandHandler;
 use crate::ext_type_registry;
 use crate::resp::RespValue;
 use crate::storage::bloom::BloomFilter;
-use super::CommandHandler;
 
 // In-memory bloom filter store, keyed by (db_index, key).
 lazy_static::lazy_static! {
@@ -23,7 +22,9 @@ fn bf_register(db: usize, key: &[u8]) {
 
 pub struct BfReserveCommand;
 impl CommandHandler for BfReserveCommand {
-    fn name(&self) -> &str { "BF.RESERVE" }
+    fn name(&self) -> &str {
+        "BF.RESERVE"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 4 {
             return RespValue::error("ERR wrong number of arguments for 'BF.RESERVE'");
@@ -51,7 +52,9 @@ impl CommandHandler for BfReserveCommand {
 
 pub struct BfAddCommand;
 impl CommandHandler for BfAddCommand {
-    fn name(&self) -> &str { "BF.ADD" }
+    fn name(&self) -> &str {
+        "BF.ADD"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.ADD'");
@@ -67,10 +70,14 @@ impl CommandHandler for BfAddCommand {
         let db = *db_index;
         let mut store = BF_STORE.lock();
         let is_new = !store.contains_key(&(db, key.clone()));
-        let bf = store.entry((db, key.clone())).or_insert_with(|| BloomFilter::new(100));
+        let bf = store
+            .entry((db, key.clone()))
+            .or_insert_with(|| BloomFilter::new(100));
         let existed = bf.may_contain(&item);
         bf.add(&item);
-        if is_new { bf_register(db, &key); }
+        if is_new {
+            bf_register(db, &key);
+        }
         RespValue::Integer(if existed { 0 } else { 1 })
     }
 }
@@ -79,7 +86,9 @@ impl CommandHandler for BfAddCommand {
 
 pub struct BfMAddCommand;
 impl CommandHandler for BfMAddCommand {
-    fn name(&self) -> &str { "BF.MADD" }
+    fn name(&self) -> &str {
+        "BF.MADD"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.MADD'");
@@ -91,17 +100,24 @@ impl CommandHandler for BfMAddCommand {
         let db = *db_index;
         let mut store = BF_STORE.lock();
         let is_new = !store.contains_key(&(db, key.clone()));
-        let bf = store.entry((db, key.clone())).or_insert_with(|| BloomFilter::new(100));
-        if is_new { bf_register(db, &key); }
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            if let Some(item) = a.as_bytes() {
-                let existed = bf.may_contain(item);
-                bf.add(item);
-                RespValue::Integer(if existed { 0 } else { 1 })
-            } else {
-                RespValue::error("ERR item must be a string")
-            }
-        }).collect();
+        let bf = store
+            .entry((db, key.clone()))
+            .or_insert_with(|| BloomFilter::new(100));
+        if is_new {
+            bf_register(db, &key);
+        }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                if let Some(item) = a.as_bytes() {
+                    let existed = bf.may_contain(item);
+                    bf.add(item);
+                    RespValue::Integer(if existed { 0 } else { 1 })
+                } else {
+                    RespValue::error("ERR item must be a string")
+                }
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
@@ -110,7 +126,9 @@ impl CommandHandler for BfMAddCommand {
 
 pub struct BfExistsCommand;
 impl CommandHandler for BfExistsCommand {
-    fn name(&self) -> &str { "BF.EXISTS" }
+    fn name(&self) -> &str {
+        "BF.EXISTS"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.EXISTS'");
@@ -136,7 +154,9 @@ impl CommandHandler for BfExistsCommand {
 
 pub struct BfMExistsCommand;
 impl CommandHandler for BfMExistsCommand {
-    fn name(&self) -> &str { "BF.MEXISTS" }
+    fn name(&self) -> &str {
+        "BF.MEXISTS"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.MEXISTS'");
@@ -148,16 +168,25 @@ impl CommandHandler for BfMExistsCommand {
         let db = *db_index;
         let store = BF_STORE.lock();
         let bf = store.get(&(db, key));
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            if let Some(item) = a.as_bytes() {
-                RespValue::Integer(match bf {
-                    Some(b) => if b.may_contain(item) { 1 } else { 0 },
-                    None => 0,
-                })
-            } else {
-                RespValue::Integer(0)
-            }
-        }).collect();
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                if let Some(item) = a.as_bytes() {
+                    RespValue::Integer(match bf {
+                        Some(b) => {
+                            if b.may_contain(item) {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        None => 0,
+                    })
+                } else {
+                    RespValue::Integer(0)
+                }
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
@@ -166,7 +195,9 @@ impl CommandHandler for BfMExistsCommand {
 
 pub struct BfCardCommand;
 impl CommandHandler for BfCardCommand {
-    fn name(&self) -> &str { "BF.CARD" }
+    fn name(&self) -> &str {
+        "BF.CARD"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'BF.CARD'");
@@ -188,7 +219,9 @@ impl CommandHandler for BfCardCommand {
 
 pub struct BfInfoCommand;
 impl CommandHandler for BfInfoCommand {
-    fn name(&self) -> &str { "BF.INFO" }
+    fn name(&self) -> &str {
+        "BF.INFO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'BF.INFO'");
@@ -230,7 +263,9 @@ impl CommandHandler for BfInfoCommand {
 
 pub struct BfInsertCommand;
 impl CommandHandler for BfInsertCommand {
-    fn name(&self) -> &str { "BF.INSERT" }
+    fn name(&self) -> &str {
+        "BF.INSERT"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.INSERT'");
@@ -248,16 +283,24 @@ impl CommandHandler for BfInsertCommand {
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
                 Some("CAPACITY") => {
                     i += 1;
-                    capacity = args.get(i)
+                    capacity = args
+                        .get(i)
                         .and_then(|a| a.as_str())
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(100);
                 }
                 Some("ERROR") | Some("EXPANSION") | Some("NONSCALING") => {
-                    if args.get(i + 1).is_some() { i += 1; }
+                    if args.get(i + 1).is_some() {
+                        i += 1;
+                    }
                 }
-                Some("NOCREATE") => { nocreate = true; }
-                Some("ITEMS") => { items_start = i + 1; break; }
+                Some("NOCREATE") => {
+                    nocreate = true;
+                }
+                Some("ITEMS") => {
+                    items_start = i + 1;
+                    break;
+                }
                 _ => {}
             }
             i += 1;
@@ -269,18 +312,25 @@ impl CommandHandler for BfInsertCommand {
             return RespValue::error("ERR not found");
         }
         let is_new = !store.contains_key(&(db, key.clone()));
-        let bf = store.entry((db, key.clone())).or_insert_with(|| BloomFilter::new(capacity));
-        if is_new { bf_register(db, &key); }
+        let bf = store
+            .entry((db, key.clone()))
+            .or_insert_with(|| BloomFilter::new(capacity));
+        if is_new {
+            bf_register(db, &key);
+        }
 
-        let results: Vec<RespValue> = args[items_start..].iter().map(|a| {
-            if let Some(item) = a.as_bytes() {
-                let existed = bf.may_contain(item);
-                bf.add(item);
-                RespValue::Integer(if existed { 0 } else { 1 })
-            } else {
-                RespValue::Integer(0)
-            }
-        }).collect();
+        let results: Vec<RespValue> = args[items_start..]
+            .iter()
+            .map(|a| {
+                if let Some(item) = a.as_bytes() {
+                    let existed = bf.may_contain(item);
+                    bf.add(item);
+                    RespValue::Integer(if existed { 0 } else { 1 })
+                } else {
+                    RespValue::Integer(0)
+                }
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
@@ -289,7 +339,9 @@ impl CommandHandler for BfInsertCommand {
 
 pub struct BfScanDumpCommand;
 impl CommandHandler for BfScanDumpCommand {
-    fn name(&self) -> &str { "BF.SCANDUMP" }
+    fn name(&self) -> &str {
+        "BF.SCANDUMP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'BF.SCANDUMP'");
@@ -323,7 +375,9 @@ impl CommandHandler for BfScanDumpCommand {
 
 pub struct BfLoadChunkCommand;
 impl CommandHandler for BfLoadChunkCommand {
-    fn name(&self) -> &str { "BF.LOADCHUNK" }
+    fn name(&self) -> &str {
+        "BF.LOADCHUNK"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 4 {
             return RespValue::error("ERR wrong number of arguments for 'BF.LOADCHUNK'");
@@ -343,7 +397,9 @@ impl CommandHandler for BfLoadChunkCommand {
         let bf = BloomFilter::deserialize(&data);
         let is_new = !BF_STORE.lock().contains_key(&(db, key.clone()));
         BF_STORE.lock().insert((db, key.clone()), bf);
-        if is_new { bf_register(db, &key); }
+        if is_new {
+            bf_register(db, &key);
+        }
         RespValue::ok()
     }
 }

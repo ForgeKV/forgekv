@@ -13,7 +13,6 @@
 ///   - redis.error_reply(s)  — return {err = s}
 ///   - redis.log(level, msg) — logs to stderr
 ///   - KEYS / ARGV global tables (1-indexed, matching Redis semantics)
-
 use std::sync::Arc;
 
 use crate::commands::CommandRegistry;
@@ -193,7 +192,9 @@ mod lua_impl {
                     out.push(RespValue::BulkString(Some(n.to_string().into_bytes())));
                 }
                 Value::Number(f) => {
-                    out.push(RespValue::BulkString(Some((*f as i64).to_string().into_bytes())));
+                    out.push(RespValue::BulkString(Some(
+                        (*f as i64).to_string().into_bytes(),
+                    )));
                 }
                 _ => {
                     return Err(LuaError::RuntimeError(

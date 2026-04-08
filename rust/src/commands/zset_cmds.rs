@@ -132,8 +132,14 @@ impl CommandHandler for ZRangeCommand {
             Some(k) => k,
             None => return RespValue::error("ERR invalid key"),
         };
-        let min_str = match args[2].as_str() { Some(s) => s.to_string(), None => return RespValue::error("ERR invalid min") };
-        let max_str = match args[3].as_str() { Some(s) => s.to_string(), None => return RespValue::error("ERR invalid max") };
+        let min_str = match args[2].as_str() {
+            Some(s) => s.to_string(),
+            None => return RespValue::error("ERR invalid min"),
+        };
+        let max_str = match args[3].as_str() {
+            Some(s) => s.to_string(),
+            None => return RespValue::error("ERR invalid max"),
+        };
 
         let mut byscore = false;
         let mut bylex = false;
@@ -150,9 +156,13 @@ impl CommandHandler for ZRangeCommand {
                 Some("WITHSCORES") => withscores = true,
                 Some("LIMIT") => {
                     i += 1;
-                    if i < args.len() { offset = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(0); }
+                    if i < args.len() {
+                        offset = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    }
                     i += 1;
-                    if i < args.len() { limit = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(-1); }
+                    if i < args.len() {
+                        limit = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                    }
                 }
                 _ => {}
             }
@@ -161,59 +171,134 @@ impl CommandHandler for ZRangeCommand {
 
         if byscore {
             // min/max are scores; REV means swap them and return descending
-            let (min_s, max_s) = if rev { (&max_str, &min_str) } else { (&min_str, &max_str) };
-            let (min, min_excl) = match parse_score(min_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not a float") };
-            let (max, max_excl) = match parse_score(max_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not a float") };
-            match self.db.zrangebyscore(*db_index, key, min, max, min_excl, max_excl, 0, -1) {
+            let (min_s, max_s) = if rev {
+                (&max_str, &min_str)
+            } else {
+                (&min_str, &max_str)
+            };
+            let (min, min_excl) = match parse_score(min_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not a float"),
+            };
+            let (max, max_excl) = match parse_score(max_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not a float"),
+            };
+            match self
+                .db
+                .zrangebyscore(*db_index, key, min, max, min_excl, max_excl, 0, -1)
+            {
                 Ok(mut items) => {
-                    if rev { items.reverse(); }
+                    if rev {
+                        items.reverse();
+                    }
                     let off = offset as usize;
-                    if off < items.len() { items = items[off..].to_vec(); } else { items = vec![]; }
-                    if limit >= 0 { items.truncate(limit as usize); }
+                    if off < items.len() {
+                        items = items[off..].to_vec();
+                    } else {
+                        items = vec![];
+                    }
+                    if limit >= 0 {
+                        items.truncate(limit as usize);
+                    }
                     if withscores {
                         let mut result = Vec::with_capacity(items.len() * 2);
-                        for (m, s) in items { result.push(RespValue::bulk_bytes(m)); result.push(RespValue::bulk_str(&format_score(s))); }
+                        for (m, s) in items {
+                            result.push(RespValue::bulk_bytes(m));
+                            result.push(RespValue::bulk_str(&format_score(s)));
+                        }
                         RespValue::Array(Some(result))
                     } else {
-                        RespValue::Array(Some(items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect()))
+                        RespValue::Array(Some(
+                            items
+                                .into_iter()
+                                .map(|(m, _)| RespValue::bulk_bytes(m))
+                                .collect(),
+                        ))
                     }
                 }
                 Err(e) => map_err(e),
             }
         } else if bylex {
-            let (min_s, max_s) = if rev { (&max_str, &min_str) } else { (&min_str, &max_str) };
-            let (min, min_inc) = match parse_lex_bound(min_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not valid string range item") };
-            let (max, max_inc) = match parse_lex_bound(max_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not valid string range item") };
-            match self.db.zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, 0, -1) {
+            let (min_s, max_s) = if rev {
+                (&max_str, &min_str)
+            } else {
+                (&min_str, &max_str)
+            };
+            let (min, min_inc) = match parse_lex_bound(min_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not valid string range item"),
+            };
+            let (max, max_inc) = match parse_lex_bound(max_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not valid string range item"),
+            };
+            match self
+                .db
+                .zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, 0, -1)
+            {
                 Ok(mut items) => {
-                    if rev { items.reverse(); }
+                    if rev {
+                        items.reverse();
+                    }
                     let off = offset as usize;
-                    if off < items.len() { items = items[off..].to_vec(); } else { items = vec![]; }
-                    if limit >= 0 { items.truncate(limit as usize); }
+                    if off < items.len() {
+                        items = items[off..].to_vec();
+                    } else {
+                        items = vec![];
+                    }
+                    if limit >= 0 {
+                        items.truncate(limit as usize);
+                    }
                     RespValue::Array(Some(items.into_iter().map(RespValue::bulk_bytes).collect()))
                 }
                 Err(e) => map_err(e),
             }
         } else {
             // rank-based
-            let start: i64 = match min_str.parse() { Ok(n) => n, Err(_) => return RespValue::error("ERR value is not an integer or out of range") };
-            let stop: i64 = match max_str.parse() { Ok(n) => n, Err(_) => return RespValue::error("ERR value is not an integer or out of range") };
+            let start: i64 = match min_str.parse() {
+                Ok(n) => n,
+                Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
+            };
+            let stop: i64 = match max_str.parse() {
+                Ok(n) => n,
+                Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
+            };
             if rev {
                 // REV: indices are from the end (highest score first). Convert to forward indices.
-                let card = match self.db.zcard(*db_index, key) { Ok(n) => n, Err(e) => return map_err(e) };
+                let card = match self.db.zcard(*db_index, key) {
+                    Ok(n) => n,
+                    Err(e) => return map_err(e),
+                };
                 // start/stop are positions in rev order: pos 0 = highest (forward index count-1)
                 // forward_start = count - 1 - stop, forward_stop = count - 1 - start
-                let fwd_start = if stop < 0 { -stop - 1 } else { (card - 1 - stop).max(0) };
-                let fwd_stop = if start < 0 { -start - 1 } else { (card - 1 - start).max(0) };
+                let fwd_start = if stop < 0 {
+                    -stop - 1
+                } else {
+                    (card - 1 - stop).max(0)
+                };
+                let fwd_stop = if start < 0 {
+                    -start - 1
+                } else {
+                    (card - 1 - start).max(0)
+                };
                 match self.db.zrange(*db_index, key, fwd_start, fwd_stop) {
                     Ok(mut items) => {
                         items.reverse();
                         if withscores {
                             let mut result = Vec::with_capacity(items.len() * 2);
-                            for (m, s) in items { result.push(RespValue::bulk_bytes(m)); result.push(RespValue::bulk_str(&format_score(s))); }
+                            for (m, s) in items {
+                                result.push(RespValue::bulk_bytes(m));
+                                result.push(RespValue::bulk_str(&format_score(s)));
+                            }
                             RespValue::Array(Some(result))
                         } else {
-                            RespValue::Array(Some(items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect()))
+                            RespValue::Array(Some(
+                                items
+                                    .into_iter()
+                                    .map(|(m, _)| RespValue::bulk_bytes(m))
+                                    .collect(),
+                            ))
                         }
                     }
                     Err(e) => map_err(e),
@@ -223,10 +308,18 @@ impl CommandHandler for ZRangeCommand {
                     Ok(items) => {
                         if withscores {
                             let mut result = Vec::with_capacity(items.len() * 2);
-                            for (m, s) in items { result.push(RespValue::bulk_bytes(m)); result.push(RespValue::bulk_str(&format_score(s))); }
+                            for (m, s) in items {
+                                result.push(RespValue::bulk_bytes(m));
+                                result.push(RespValue::bulk_str(&format_score(s)));
+                            }
                             RespValue::Array(Some(result))
                         } else {
-                            RespValue::Array(Some(items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect()))
+                            RespValue::Array(Some(
+                                items
+                                    .into_iter()
+                                    .map(|(m, _)| RespValue::bulk_bytes(m))
+                                    .collect(),
+                            ))
                         }
                     }
                     Err(e) => map_err(e),
@@ -342,9 +435,19 @@ impl CommandHandler for ZRankCommand {
         if args.len() < 3 || args.len() > 4 {
             return RespValue::error("ERR wrong number of arguments for 'zrank' command");
         }
-        let key = match args[1].as_bytes() { Some(k) => k, None => return RespValue::error("ERR invalid key") };
-        let member = match args[2].as_bytes() { Some(m) => m, None => return RespValue::error("ERR invalid member") };
-        let withscore = args.get(3).and_then(|a| a.as_str()).map(|s| s.to_uppercase() == "WITHSCORE").unwrap_or(false);
+        let key = match args[1].as_bytes() {
+            Some(k) => k,
+            None => return RespValue::error("ERR invalid key"),
+        };
+        let member = match args[2].as_bytes() {
+            Some(m) => m,
+            None => return RespValue::error("ERR invalid member"),
+        };
+        let withscore = args
+            .get(3)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase() == "WITHSCORE")
+            .unwrap_or(false);
         match self.db.zrank(*db_index, key, member) {
             Ok(Some(rank)) => {
                 if withscore {
@@ -391,9 +494,11 @@ impl CommandHandler for ZRevRangeCommand {
             None => return RespValue::error("ERR value is not an integer or out of range"),
         };
 
-        let withscores = args[4..]
-            .iter()
-            .any(|a| a.as_str().map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false));
+        let withscores = args[4..].iter().any(|a| {
+            a.as_str()
+                .map(|s| s.to_uppercase() == "WITHSCORES")
+                .unwrap_or(false)
+        });
 
         // ZREVRANGE indices are into the reversed list; convert to ascending indices
         let size = match self.db.zcard(*db_index, key) {
@@ -405,8 +510,16 @@ impl CommandHandler for ZRevRangeCommand {
         } else {
             let len = size;
             // Normalize negative indices relative to reversed list
-            let rev_start = if start < 0 { (len + start).max(0) } else { start.min(len - 1) };
-            let rev_stop = if stop < 0 { (len + stop).max(0) } else { stop.min(len - 1) };
+            let rev_start = if start < 0 {
+                (len + start).max(0)
+            } else {
+                start.min(len - 1)
+            };
+            let rev_stop = if stop < 0 {
+                (len + stop).max(0)
+            } else {
+                stop.min(len - 1)
+            };
             // Convert to ascending: asc_idx = (len - 1) - rev_idx
             let asc_s = (len - 1) - rev_stop;
             let asc_e = (len - 1) - rev_start;
@@ -424,8 +537,10 @@ impl CommandHandler for ZRevRangeCommand {
                     }
                     RespValue::Array(Some(result))
                 } else {
-                    let result: Vec<RespValue> =
-                        items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+                    let result: Vec<RespValue> = items
+                        .into_iter()
+                        .map(|(m, _)| RespValue::bulk_bytes(m))
+                        .collect();
                     RespValue::Array(Some(result))
                 }
             }
@@ -447,9 +562,19 @@ impl CommandHandler for ZRevRankCommand {
         if args.len() < 3 || args.len() > 4 {
             return RespValue::error("ERR wrong number of arguments for 'zrevrank' command");
         }
-        let key = match args[1].as_bytes() { Some(k) => k, None => return RespValue::error("ERR invalid key") };
-        let member = match args[2].as_bytes() { Some(m) => m, None => return RespValue::error("ERR invalid member") };
-        let withscore = args.get(3).and_then(|a| a.as_str()).map(|s| s.to_uppercase() == "WITHSCORE").unwrap_or(false);
+        let key = match args[1].as_bytes() {
+            Some(k) => k,
+            None => return RespValue::error("ERR invalid key"),
+        };
+        let member = match args[2].as_bytes() {
+            Some(m) => m,
+            None => return RespValue::error("ERR invalid member"),
+        };
+        let withscore = args
+            .get(3)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase() == "WITHSCORE")
+            .unwrap_or(false);
         // Get card first
         let card = match self.db.zcard(*db_index, key) {
             Ok(n) => n,
@@ -581,12 +706,30 @@ impl CommandHandler for ZAddCommandV2 {
 
         while i < args.len() {
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
-                Some("NX") => { nx = true; i += 1; }
-                Some("XX") => { xx = true; i += 1; }
-                Some("GT") => { gt = true; i += 1; }
-                Some("LT") => { lt = true; i += 1; }
-                Some("CH") => { ch = true; i += 1; }
-                Some("INCR") => { incr = true; i += 1; }
+                Some("NX") => {
+                    nx = true;
+                    i += 1;
+                }
+                Some("XX") => {
+                    xx = true;
+                    i += 1;
+                }
+                Some("GT") => {
+                    gt = true;
+                    i += 1;
+                }
+                Some("LT") => {
+                    lt = true;
+                    i += 1;
+                }
+                Some("CH") => {
+                    ch = true;
+                    i += 1;
+                }
+                Some("INCR") => {
+                    incr = true;
+                    i += 1;
+                }
                 _ => break,
             }
         }
@@ -621,7 +764,10 @@ impl CommandHandler for ZAddCommandV2 {
             return RespValue::error("ERR INCR option supports a single increment-element pair");
         }
 
-        match self.db.zadd_flags(*db_index, key, &pairs, nx, xx, gt, lt, ch, incr) {
+        match self
+            .db
+            .zadd_flags(*db_index, key, &pairs, nx, xx, gt, lt, ch, incr)
+        {
             Ok((n, last_score)) => {
                 // Notify blocked BZPOPMIN/BZPOPMAX waiters
                 BLOCKING_NOTIFIER.notify(*db_index, key.to_vec());
@@ -716,7 +862,10 @@ impl CommandHandler for ZLexCountCommand {
             None => return RespValue::error("ERR min or max is not valid string range item"),
         };
 
-        match self.db.zlexcount(*db_index, key, &min, &max, min_inc, max_inc) {
+        match self
+            .db
+            .zlexcount(*db_index, key, &min, &max, min_inc, max_inc)
+        {
             Ok(n) => RespValue::integer(n),
             Err(e) => map_err(e),
         }
@@ -780,7 +929,10 @@ impl CommandHandler for ZRangeByScoreCommand {
             i += 1;
         }
 
-        match self.db.zrangebyscore(*db_index, key, min, max, min_excl, max_excl, offset, limit) {
+        match self
+            .db
+            .zrangebyscore(*db_index, key, min, max, min_excl, max_excl, offset, limit)
+        {
             Ok(items) => {
                 if withscores {
                     let mut result = Vec::with_capacity(items.len() * 2);
@@ -790,7 +942,10 @@ impl CommandHandler for ZRangeByScoreCommand {
                     }
                     RespValue::Array(Some(result))
                 } else {
-                    let result: Vec<RespValue> = items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+                    let result: Vec<RespValue> = items
+                        .into_iter()
+                        .map(|(m, _)| RespValue::bulk_bytes(m))
+                        .collect();
                     RespValue::Array(Some(result))
                 }
             }
@@ -854,9 +1009,13 @@ impl CommandHandler for ZRangeByLexCommand {
             i += 1;
         }
 
-        match self.db.zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, offset, limit) {
+        match self
+            .db
+            .zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, offset, limit)
+        {
             Ok(members) => {
-                let result: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                let result: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(result))
             }
             Err(e) => map_err(e),
@@ -875,7 +1034,9 @@ impl CommandHandler for ZRevRangeByScoreCommand {
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 4 {
-            return RespValue::error("ERR wrong number of arguments for 'zrevrangebyscore' command");
+            return RespValue::error(
+                "ERR wrong number of arguments for 'zrevrangebyscore' command",
+            );
         }
         let key = match args[1].as_bytes() {
             Some(k) => k,
@@ -923,12 +1084,21 @@ impl CommandHandler for ZRevRangeByScoreCommand {
         }
 
         // Get all items in range without limit, then reverse, then apply limit
-        match self.db.zrangebyscore(*db_index, key, min, max, min_excl, max_excl, 0, -1) {
+        match self
+            .db
+            .zrangebyscore(*db_index, key, min, max, min_excl, max_excl, 0, -1)
+        {
             Ok(mut items) => {
                 items.reverse();
                 let off = offset as usize;
-                if off < items.len() { items = items[off..].to_vec(); } else { items = vec![]; }
-                if limit >= 0 { items.truncate(limit as usize); }
+                if off < items.len() {
+                    items = items[off..].to_vec();
+                } else {
+                    items = vec![];
+                }
+                if limit >= 0 {
+                    items.truncate(limit as usize);
+                }
                 if withscores {
                     let mut result = Vec::with_capacity(items.len() * 2);
                     for (member, score) in items {
@@ -937,7 +1107,10 @@ impl CommandHandler for ZRevRangeByScoreCommand {
                     }
                     RespValue::Array(Some(result))
                 } else {
-                    let result: Vec<RespValue> = items.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+                    let result: Vec<RespValue> = items
+                        .into_iter()
+                        .map(|(m, _)| RespValue::bulk_bytes(m))
+                        .collect();
                     RespValue::Array(Some(result))
                 }
             }
@@ -1003,13 +1176,23 @@ impl CommandHandler for ZRevRangeByLexCommand {
         }
 
         // Get all items without limit, then reverse, then apply limit
-        match self.db.zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, 0, -1) {
+        match self
+            .db
+            .zrangebylex(*db_index, key, &min, &max, min_inc, max_inc, 0, -1)
+        {
             Ok(mut members) => {
                 members.reverse();
                 let off = offset as usize;
-                if off < members.len() { members = members[off..].to_vec(); } else { members = vec![]; }
-                if limit >= 0 { members.truncate(limit as usize); }
-                let result: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                if off < members.len() {
+                    members = members[off..].to_vec();
+                } else {
+                    members = vec![];
+                }
+                if limit >= 0 {
+                    members.truncate(limit as usize);
+                }
+                let result: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(result))
             }
             Err(e) => map_err(e),
@@ -1102,7 +1285,9 @@ impl CommandHandler for ZRemRangeByScoreCommand {
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 4 {
-            return RespValue::error("ERR wrong number of arguments for 'zremrangebyscore' command");
+            return RespValue::error(
+                "ERR wrong number of arguments for 'zremrangebyscore' command",
+            );
         }
         let key = match args[1].as_bytes() {
             Some(k) => k,
@@ -1126,7 +1311,10 @@ impl CommandHandler for ZRemRangeByScoreCommand {
             None => return RespValue::error("ERR min or max is not a float"),
         };
 
-        match self.db.zremrangebyscore(*db_index, key, min, max, min_excl, max_excl) {
+        match self
+            .db
+            .zremrangebyscore(*db_index, key, min, max, min_excl, max_excl)
+        {
             Ok(n) => RespValue::integer(n),
             Err(e) => map_err(e),
         }
@@ -1168,7 +1356,10 @@ impl CommandHandler for ZRemRangeByLexCommand {
             None => return RespValue::error("ERR min or max is not valid string range item"),
         };
 
-        match self.db.zremrangebylex(*db_index, key, &min, &max, min_inc, max_inc) {
+        match self
+            .db
+            .zremrangebylex(*db_index, key, &min, &max, min_inc, max_inc)
+        {
             Ok(n) => RespValue::integer(n),
             Err(e) => map_err(e),
         }
@@ -1282,7 +1473,10 @@ fn zstore_execute(
     intersect: bool,
 ) -> RespValue {
     if args.len() < 4 {
-        return RespValue::error(&format!("ERR wrong number of arguments for '{}' command", cmd.to_lowercase()));
+        return RespValue::error(&format!(
+            "ERR wrong number of arguments for '{}' command",
+            cmd.to_lowercase()
+        ));
     }
     let dst = match args[1].as_bytes() {
         Some(k) => k,
@@ -1296,7 +1490,10 @@ fn zstore_execute(
         return RespValue::error("ERR syntax error");
     }
 
-    let keys: Vec<&[u8]> = args[3..3 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+    let keys: Vec<&[u8]> = args[3..3 + numkeys]
+        .iter()
+        .filter_map(|a| a.as_bytes())
+        .collect();
 
     let mut weights: Vec<f64> = vec![1.0; numkeys];
     let mut aggregate = "SUM".to_string();
@@ -1360,7 +1557,10 @@ impl CommandHandler for ZDiffStoreCommand {
         if args.len() < 3 + numkeys {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[3..3 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<&[u8]> = args[3..3 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
 
         match self.db.zdiffstore(*db_index, dst, &keys) {
             Ok(n) => RespValue::integer(n),
@@ -1390,10 +1590,15 @@ impl CommandHandler for ZDiffCommand {
             return RespValue::error("ERR syntax error");
         }
 
-        let keys: Vec<&[u8]> = args[2..2 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
-        let withscores = args[2 + numkeys..]
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
             .iter()
-            .any(|a| a.as_str().map(|s| s.to_uppercase() == "WITHSCORES").unwrap_or(false));
+            .filter_map(|a| a.as_bytes())
+            .collect();
+        let withscores = args[2 + numkeys..].iter().any(|a| {
+            a.as_str()
+                .map(|s| s.to_uppercase() == "WITHSCORES")
+                .unwrap_or(false)
+        });
 
         // Compute diff in memory using a temp key approach
         use std::collections::HashSet;
@@ -1427,7 +1632,10 @@ impl CommandHandler for ZDiffCommand {
             }
             RespValue::Array(Some(out))
         } else {
-            let out: Vec<RespValue> = result.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+            let out: Vec<RespValue> = result
+                .into_iter()
+                .map(|(m, _)| RespValue::bulk_bytes(m))
+                .collect();
             RespValue::Array(Some(out))
         }
     }
@@ -1454,7 +1662,10 @@ impl CommandHandler for ZUnionCommand {
             return RespValue::error("ERR syntax error");
         }
 
-        let keys: Vec<&[u8]> = args[2..2 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
 
         let mut weights: Vec<f64> = vec![1.0; numkeys];
         let mut aggregate = "SUM".to_string();
@@ -1468,7 +1679,8 @@ impl CommandHandler for ZUnionCommand {
                     for j in 0..numkeys {
                         i += 1;
                         if i < args.len() {
-                            weights[j] = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+                            weights[j] =
+                                args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
                         }
                     }
                 }
@@ -1518,7 +1730,10 @@ impl CommandHandler for ZUnionCommand {
             }
             RespValue::Array(Some(out))
         } else {
-            let out: Vec<RespValue> = result.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+            let out: Vec<RespValue> = result
+                .into_iter()
+                .map(|(m, _)| RespValue::bulk_bytes(m))
+                .collect();
             RespValue::Array(Some(out))
         }
     }
@@ -1545,7 +1760,10 @@ impl CommandHandler for ZInterCommand {
             return RespValue::error("ERR syntax error");
         }
 
-        let keys: Vec<&[u8]> = args[2..2 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
 
         let mut weights: Vec<f64> = vec![1.0; numkeys];
         let mut aggregate = "SUM".to_string();
@@ -1559,7 +1777,8 @@ impl CommandHandler for ZInterCommand {
                     for j in 0..numkeys {
                         i += 1;
                         if i < args.len() {
-                            weights[j] = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+                            weights[j] =
+                                args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(1.0);
                         }
                     }
                 }
@@ -1618,7 +1837,10 @@ impl CommandHandler for ZInterCommand {
             }
             RespValue::Array(Some(out))
         } else {
-            let out: Vec<RespValue> = result.into_iter().map(|(m, _)| RespValue::bulk_bytes(m)).collect();
+            let out: Vec<RespValue> = result
+                .into_iter()
+                .map(|(m, _)| RespValue::bulk_bytes(m))
+                .collect();
             RespValue::Array(Some(out))
         }
     }
@@ -1659,7 +1881,8 @@ impl CommandHandler for ZRandMemberCommand {
             None => return RespValue::error("ERR value is not an integer or out of range"),
         };
 
-        let withscores = args.get(3)
+        let withscores = args
+            .get(3)
             .and_then(|a| a.as_str())
             .map(|s| s.to_uppercase() == "WITHSCORES")
             .unwrap_or(false);
@@ -1726,7 +1949,9 @@ impl CommandHandler for ZScanCommand {
                         pattern = args[i].as_str().map(|s| s.to_string());
                     }
                 }
-                Some("COUNT") => { i += 1; }
+                Some("COUNT") => {
+                    i += 1;
+                }
                 _ => {}
             }
             i += 1;
@@ -1799,9 +2024,13 @@ impl CommandHandler for ZRangeStoreCommand {
                 Some("REV") => rev = true,
                 Some("LIMIT") => {
                     i += 1;
-                    if i < args.len() { offset = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(0); }
+                    if i < args.len() {
+                        offset = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    }
                     i += 1;
-                    if i < args.len() { limit = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(-1); }
+                    if i < args.len() {
+                        limit = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                    }
                 }
                 _ => {}
             }
@@ -1809,33 +2038,79 @@ impl CommandHandler for ZRangeStoreCommand {
         }
 
         let items: Vec<(Vec<u8>, f64)> = if byscore {
-            let (min_s, max_s) = if rev { (&max_str, &min_str) } else { (&min_str, &max_str) };
-            let (min, min_excl) = match parse_score(min_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not a float") };
-            let (max, max_excl) = match parse_score(max_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not a float") };
-            match self.db.zrangebyscore(*db_index, src, min, max, min_excl, max_excl, 0, -1) {
+            let (min_s, max_s) = if rev {
+                (&max_str, &min_str)
+            } else {
+                (&min_str, &max_str)
+            };
+            let (min, min_excl) = match parse_score(min_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not a float"),
+            };
+            let (max, max_excl) = match parse_score(max_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not a float"),
+            };
+            match self
+                .db
+                .zrangebyscore(*db_index, src, min, max, min_excl, max_excl, 0, -1)
+            {
                 Ok(mut v) => {
-                    if rev { v.reverse(); }
+                    if rev {
+                        v.reverse();
+                    }
                     let off = offset as usize;
-                    if off < v.len() { v = v[off..].to_vec(); } else { v = vec![]; }
-                    if limit >= 0 { v.truncate(limit as usize); }
+                    if off < v.len() {
+                        v = v[off..].to_vec();
+                    } else {
+                        v = vec![];
+                    }
+                    if limit >= 0 {
+                        v.truncate(limit as usize);
+                    }
                     v
                 }
                 Err(e) => return map_err(e),
             }
         } else if bylex {
-            let (min_s, max_s) = if rev { (&max_str, &min_str) } else { (&min_str, &max_str) };
-            let (min, min_inc) = match parse_lex_bound(min_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not valid string range item") };
-            let (max, max_inc) = match parse_lex_bound(max_s) { Some(v) => v, None => return RespValue::error("ERR min or max is not valid string range item") };
-            match self.db.zrangebylex(*db_index, src, &min, &max, min_inc, max_inc, 0, -1) {
+            let (min_s, max_s) = if rev {
+                (&max_str, &min_str)
+            } else {
+                (&min_str, &max_str)
+            };
+            let (min, min_inc) = match parse_lex_bound(min_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not valid string range item"),
+            };
+            let (max, max_inc) = match parse_lex_bound(max_s) {
+                Some(v) => v,
+                None => return RespValue::error("ERR min or max is not valid string range item"),
+            };
+            match self
+                .db
+                .zrangebylex(*db_index, src, &min, &max, min_inc, max_inc, 0, -1)
+            {
                 Ok(mut v) => {
-                    if rev { v.reverse(); }
+                    if rev {
+                        v.reverse();
+                    }
                     let off = offset as usize;
-                    if off < v.len() { v = v[off..].to_vec(); } else { v = vec![]; }
-                    if limit >= 0 { v.truncate(limit as usize); }
+                    if off < v.len() {
+                        v = v[off..].to_vec();
+                    } else {
+                        v = vec![];
+                    }
+                    if limit >= 0 {
+                        v.truncate(limit as usize);
+                    }
                     // Need scores for storage - fetch them
                     let mut result = Vec::new();
                     for m in v {
-                        let score = self.db.zscore(*db_index, src, &m).unwrap_or(None).unwrap_or(0.0);
+                        let score = self
+                            .db
+                            .zscore(*db_index, src, &m)
+                            .unwrap_or(None)
+                            .unwrap_or(0.0);
                         result.push((m, score));
                     }
                     result
@@ -1843,10 +2118,21 @@ impl CommandHandler for ZRangeStoreCommand {
                 Err(e) => return map_err(e),
             }
         } else {
-            let start: i64 = match min_str.parse() { Ok(n) => n, Err(_) => return RespValue::error("ERR value is not an integer or out of range") };
-            let stop: i64 = match max_str.parse() { Ok(n) => n, Err(_) => return RespValue::error("ERR value is not an integer or out of range") };
+            let start: i64 = match min_str.parse() {
+                Ok(n) => n,
+                Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
+            };
+            let stop: i64 = match max_str.parse() {
+                Ok(n) => n,
+                Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
+            };
             match self.db.zrange(*db_index, src, start, stop) {
-                Ok(mut v) => { if rev { v.reverse(); } v }
+                Ok(mut v) => {
+                    if rev {
+                        v.reverse();
+                    }
+                    v
+                }
                 Err(e) => return map_err(e),
             }
         };
@@ -1869,13 +2155,18 @@ pub struct BzpopmaxCommand {
 }
 
 impl CommandHandler for BzpopmaxCommand {
-    fn name(&self) -> &str { "BZPOPMAX" }
+    fn name(&self) -> &str {
+        "BZPOPMAX"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // BZPOPMAX key [key...] timeout -> non-blocking ZPOPMAX
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'bzpopmax' command");
         }
-        let keys: Vec<_> = args[1..args.len()-1].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<_> = args[1..args.len() - 1]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
         for key in &keys {
             match self.db.zpopmax(*db_index, key, 1) {
                 Ok(items) if !items.is_empty() => {
@@ -1899,12 +2190,17 @@ pub struct BzpopminCommand {
 }
 
 impl CommandHandler for BzpopminCommand {
-    fn name(&self) -> &str { "BZPOPMIN" }
+    fn name(&self) -> &str {
+        "BZPOPMIN"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'bzpopmin' command");
         }
-        let keys: Vec<_> = args[1..args.len()-1].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<_> = args[1..args.len() - 1]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
         for key in &keys {
             match self.db.zpopmin(*db_index, key, 1) {
                 Ok(items) if !items.is_empty() => {
@@ -1928,7 +2224,9 @@ pub struct ZInterCardCommand {
 }
 
 impl CommandHandler for ZInterCardCommand {
-    fn name(&self) -> &str { "ZINTERCARD" }
+    fn name(&self) -> &str {
+        "ZINTERCARD"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'zintercard' command");
@@ -1940,15 +2238,25 @@ impl CommandHandler for ZInterCardCommand {
         if numkeys == 0 || args.len() < 2 + numkeys {
             return RespValue::error("ERR numkeys can't be zero or larger than number of keys");
         }
-        let keys: Vec<&[u8]> = args[2..2+numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
         let limit: i64 = {
-            let rest = &args[2+numkeys..];
+            let rest = &args[2 + numkeys..];
             let mut l = 0i64;
             let mut i = 0;
             while i < rest.len() {
-                if rest[i].as_str().map(|s| s.to_uppercase() == "LIMIT").unwrap_or(false) {
+                if rest[i]
+                    .as_str()
+                    .map(|s| s.to_uppercase() == "LIMIT")
+                    .unwrap_or(false)
+                {
                     if i + 1 < rest.len() {
-                        l = rest[i+1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        l = rest[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
                     }
                 }
                 i += 1;
@@ -1967,7 +2275,9 @@ pub struct ZmpopCommand {
 }
 
 impl CommandHandler for ZmpopCommand {
-    fn name(&self) -> &str { "ZMPOP" }
+    fn name(&self) -> &str {
+        "ZMPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // ZMPOP numkeys key [key ...] MIN|MAX [COUNT count]
         if args.len() < 4 {
@@ -1980,17 +2290,30 @@ impl CommandHandler for ZmpopCommand {
         if numkeys == 0 || args.len() < 2 + numkeys + 1 {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[2..2+numkeys].iter().filter_map(|a| a.as_bytes()).collect();
-        let direction = args[2+numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
+        let direction = args[2 + numkeys]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         let pop_min = direction == "MIN";
         let count: i64 = {
-            let rest = &args[3+numkeys..];
+            let rest = &args[3 + numkeys..];
             let mut c = 1i64;
             let mut i = 0;
             while i < rest.len() {
-                if rest[i].as_str().map(|s| s.to_uppercase() == "COUNT").unwrap_or(false) {
+                if rest[i]
+                    .as_str()
+                    .map(|s| s.to_uppercase() == "COUNT")
+                    .unwrap_or(false)
+                {
                     if i + 1 < rest.len() {
-                        c = rest[i+1].as_str().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        c = rest[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1);
                     }
                 }
                 i += 1;
@@ -2000,12 +2323,15 @@ impl CommandHandler for ZmpopCommand {
         match self.db.zpop_multi(*db_index, &keys, pop_min, count) {
             Ok(None) => RespValue::null_array(),
             Ok(Some((key, items))) => {
-                let elements: Vec<RespValue> = items.into_iter().map(|(member, score)| {
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_bytes(member),
-                        RespValue::bulk_str(&format_score(score)),
-                    ]))
-                }).collect();
+                let elements: Vec<RespValue> = items
+                    .into_iter()
+                    .map(|(member, score)| {
+                        RespValue::Array(Some(vec![
+                            RespValue::bulk_bytes(member),
+                            RespValue::bulk_str(&format_score(score)),
+                        ]))
+                    })
+                    .collect();
                 RespValue::Array(Some(vec![
                     RespValue::bulk_bytes(key),
                     RespValue::Array(Some(elements)),
@@ -2021,7 +2347,9 @@ pub struct BzmpopCommand {
 }
 
 impl CommandHandler for BzmpopCommand {
-    fn name(&self) -> &str { "BZMPOP" }
+    fn name(&self) -> &str {
+        "BZMPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]
         if args.len() < 5 {
@@ -2035,17 +2363,30 @@ impl CommandHandler for BzmpopCommand {
         if numkeys == 0 || args.len() < 3 + numkeys + 1 {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[3..3+numkeys].iter().filter_map(|a| a.as_bytes()).collect();
-        let direction = args[3+numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let keys: Vec<&[u8]> = args[3..3 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
+        let direction = args[3 + numkeys]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         let pop_min = direction == "MIN";
         let count: i64 = {
-            let rest = &args[4+numkeys..];
+            let rest = &args[4 + numkeys..];
             let mut c = 1i64;
             let mut i = 0;
             while i < rest.len() {
-                if rest[i].as_str().map(|s| s.to_uppercase() == "COUNT").unwrap_or(false) {
+                if rest[i]
+                    .as_str()
+                    .map(|s| s.to_uppercase() == "COUNT")
+                    .unwrap_or(false)
+                {
                     if i + 1 < rest.len() {
-                        c = rest[i+1].as_str().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        c = rest[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1);
                     }
                 }
                 i += 1;
@@ -2055,12 +2396,15 @@ impl CommandHandler for BzmpopCommand {
         match self.db.zpop_multi(*db_index, &keys, pop_min, count) {
             Ok(None) => RespValue::null_array(),
             Ok(Some((key, items))) => {
-                let elements: Vec<RespValue> = items.into_iter().map(|(member, score)| {
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_bytes(member),
-                        RespValue::bulk_str(&format_score(score)),
-                    ]))
-                }).collect();
+                let elements: Vec<RespValue> = items
+                    .into_iter()
+                    .map(|(member, score)| {
+                        RespValue::Array(Some(vec![
+                            RespValue::bulk_bytes(member),
+                            RespValue::bulk_str(&format_score(score)),
+                        ]))
+                    })
+                    .collect();
                 RespValue::Array(Some(vec![
                     RespValue::bulk_bytes(key),
                     RespValue::Array(Some(elements)),

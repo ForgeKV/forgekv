@@ -73,8 +73,7 @@ impl PubSubHub {
         channels
             .iter()
             .filter(|(ch, tx)| {
-                tx.receiver_count() > 0
-                    && pattern.map_or(true, |p| pattern_matches(p, ch))
+                tx.receiver_count() > 0 && pattern.map_or(true, |p| pattern_matches(p, ch))
             })
             .map(|(ch, _)| ch.clone())
             .collect()

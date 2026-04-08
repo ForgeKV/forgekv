@@ -65,7 +65,9 @@ impl CommandHandler for SetCommand {
                     }
                     let secs: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if secs <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -79,7 +81,9 @@ impl CommandHandler for SetCommand {
                     }
                     let ms: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if ms <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -93,7 +97,9 @@ impl CommandHandler for SetCommand {
                     }
                     let secs: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if secs <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -107,7 +113,9 @@ impl CommandHandler for SetCommand {
                     }
                     let ms: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if ms <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -121,7 +129,10 @@ impl CommandHandler for SetCommand {
             i += 1;
         }
 
-        match self.db.string_set(*db_index, &key, &value, expiry_ms, nx, xx) {
+        match self
+            .db
+            .string_set(*db_index, &key, &value, expiry_ms, nx, xx)
+        {
             Ok(()) => RespValue::ok(),
             Err(e) => map_err(e),
         }
@@ -469,7 +480,10 @@ impl CommandHandler for SetExCommand {
             None => return RespValue::error("ERR invalid value"),
         };
         let expiry_ms = now_ms() + secs * 1000;
-        match self.db.string_set(*db_index, &key, &value, expiry_ms, false, false) {
+        match self
+            .db
+            .string_set(*db_index, &key, &value, expiry_ms, false, false)
+        {
             Ok(()) => RespValue::ok(),
             Err(e) => map_err(e),
         }
@@ -506,7 +520,10 @@ impl CommandHandler for PSetExCommand {
             None => return RespValue::error("ERR invalid value"),
         };
         let expiry_ms = now_ms() + ms;
-        match self.db.string_set(*db_index, &key, &value, expiry_ms, false, false) {
+        match self
+            .db
+            .string_set(*db_index, &key, &value, expiry_ms, false, false)
+        {
             Ok(()) => RespValue::ok(),
             Err(e) => map_err(e),
         }
@@ -547,7 +564,10 @@ impl CommandHandler for IncrByFloatCommand {
 
         let new_val = current + delta;
         let new_str = format_float(new_val);
-        if let Err(e) = self.db.string_set(*db_index, key, new_str.as_bytes(), 0, false, false) {
+        if let Err(e) = self
+            .db
+            .string_set(*db_index, key, new_str.as_bytes(), 0, false, false)
+        {
             return map_err(e);
         }
         RespValue::bulk_str(&new_str)
@@ -623,8 +643,16 @@ impl CommandHandler for GetRangeCommand {
         };
 
         let len = val.len() as i64;
-        let norm_start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let norm_end = if end < 0 { (len + end).max(-1) } else { end.min(len - 1) };
+        let norm_start = if start < 0 {
+            (len + start).max(0)
+        } else {
+            start.min(len)
+        };
+        let norm_end = if end < 0 {
+            (len + end).max(-1)
+        } else {
+            end.min(len - 1)
+        };
 
         if norm_start > norm_end || norm_start >= len {
             return RespValue::bulk_str("");
@@ -670,8 +698,16 @@ impl CommandHandler for SubStrCommand {
         };
 
         let len = val.len() as i64;
-        let norm_start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let norm_end = if end < 0 { (len + end).max(-1) } else { end.min(len - 1) };
+        let norm_start = if start < 0 {
+            (len + start).max(0)
+        } else {
+            start.min(len)
+        };
+        let norm_end = if end < 0 {
+            (len + end).max(-1)
+        } else {
+            end.min(len - 1)
+        };
 
         if norm_start > norm_end || norm_start >= len {
             return RespValue::bulk_str("");
@@ -712,7 +748,10 @@ impl CommandHandler for SetRangeCommand {
             None => return RespValue::error("ERR invalid value"),
         };
 
-        match self.db.string_setrange(*db_index, &key, offset as usize, value) {
+        match self
+            .db
+            .string_setrange(*db_index, &key, offset as usize, value)
+        {
             Ok(n) => RespValue::integer(n),
             Err(e) => map_err(e),
         }
@@ -905,7 +944,9 @@ impl CommandHandler for SetCommandV2 {
                     }
                     let secs: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if secs <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -919,7 +960,9 @@ impl CommandHandler for SetCommandV2 {
                     }
                     let ms: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if ms <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -933,7 +976,9 @@ impl CommandHandler for SetCommandV2 {
                     }
                     let secs: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if secs <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -947,7 +992,9 @@ impl CommandHandler for SetCommandV2 {
                     }
                     let ms: i64 = match args[i].as_str().and_then(|s| s.parse().ok()) {
                         Some(n) => n,
-                        None => return RespValue::error("ERR value is not an integer or out of range"),
+                        None => {
+                            return RespValue::error("ERR value is not an integer or out of range")
+                        }
                     };
                     if ms <= 0 {
                         return RespValue::error("ERR invalid expire time in 'set' command");
@@ -965,7 +1012,10 @@ impl CommandHandler for SetCommandV2 {
 
         // Fast path: no GET option and no KEEPTTL — use the optimized put2 path.
         if !get && !keepttl {
-            return match self.db.string_set(*db_index, &key, &value, expiry_ms, nx, xx) {
+            return match self
+                .db
+                .string_set(*db_index, &key, &value, expiry_ms, nx, xx)
+            {
                 Ok(()) => RespValue::ok(),
                 Err(crate::database::RedisError::NxFail) => RespValue::null_bulk(),
                 Err(crate::database::RedisError::XxFail) => RespValue::null_bulk(),
@@ -973,7 +1023,10 @@ impl CommandHandler for SetCommandV2 {
             };
         }
 
-        match self.db.string_set_get_old(*db_index, &key, &value, expiry_ms, nx, xx, keepttl) {
+        match self
+            .db
+            .string_set_get_old(*db_index, &key, &value, expiry_ms, nx, xx, keepttl)
+        {
             Ok((set_ok, old_val)) => {
                 if get {
                     match old_val {
@@ -1128,7 +1181,8 @@ impl CommandHandler for BitCountCommand {
                 None => return not_integer(),
             };
             // Check for BYTE/BIT unit (5th arg)
-            let bit_mode = args.get(4)
+            let bit_mode = args
+                .get(4)
                 .and_then(|a| a.as_str())
                 .map(|s| s.to_uppercase() == "BIT")
                 .unwrap_or(false);
@@ -1136,8 +1190,16 @@ impl CommandHandler for BitCountCommand {
             if bit_mode {
                 // BIT mode: start/end are bit indices
                 let total_bits = (val.len() * 8) as i64;
-                let norm_start = if start < 0 { (total_bits + start).max(0) } else { start.min(total_bits) };
-                let norm_end = if end < 0 { (total_bits + end).max(-1) } else { end.min(total_bits - 1) };
+                let norm_start = if start < 0 {
+                    (total_bits + start).max(0)
+                } else {
+                    start.min(total_bits)
+                };
+                let norm_end = if end < 0 {
+                    (total_bits + end).max(-1)
+                } else {
+                    end.min(total_bits - 1)
+                };
                 if norm_start > norm_end {
                     return RespValue::integer(0);
                 }
@@ -1153,8 +1215,16 @@ impl CommandHandler for BitCountCommand {
             } else {
                 // BYTE mode (default)
                 let len = val.len() as i64;
-                let norm_start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-                let norm_end = if end < 0 { (len + end).max(-1) } else { end.min(len - 1) };
+                let norm_start = if start < 0 {
+                    (len + start).max(0)
+                } else {
+                    start.min(len)
+                };
+                let norm_end = if end < 0 {
+                    (len + end).max(-1)
+                } else {
+                    end.min(len - 1)
+                };
                 let bytes = if norm_start > norm_end {
                     &val[0..0]
                 } else {
@@ -1210,7 +1280,10 @@ impl CommandHandler for BitOpCommand {
             }
             let result: Vec<u8> = values[0].iter().map(|b| !b).collect();
             let len = result.len() as i64;
-            match self.db.string_set(*db_index, &dst, &result, 0, false, false) {
+            match self
+                .db
+                .string_set(*db_index, &dst, &result, 0, false, false)
+            {
                 Ok(()) => return RespValue::integer(len),
                 Err(e) => return map_err(e),
             }
@@ -1252,7 +1325,10 @@ impl CommandHandler for BitOpCommand {
         }
 
         let len = result.len() as i64;
-        match self.db.string_set(*db_index, &dst, &result, 0, false, false) {
+        match self
+            .db
+            .string_set(*db_index, &dst, &result, 0, false, false)
+        {
             Ok(()) => RespValue::integer(len),
             Err(e) => map_err(e),
         }
@@ -1273,7 +1349,10 @@ impl CommandHandler for BitPosCommand {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'bitpos' command");
         }
-        let key = match args[1].as_bytes() { Some(k) => k, None => return RespValue::error("ERR invalid key") };
+        let key = match args[1].as_bytes() {
+            Some(k) => k,
+            None => return RespValue::error("ERR invalid key"),
+        };
         let bit: u8 = match args[2].as_str().and_then(|s| s.parse::<u8>().ok()) {
             Some(n) if n <= 1 => n,
             _ => return RespValue::error("ERR bit is not an integer or out of range"),
@@ -1281,7 +1360,11 @@ impl CommandHandler for BitPosCommand {
         let val = match self.db.string_get(*db_index, key) {
             Ok(Some(v)) => v,
             Ok(None) => {
-                return if bit == 0 { RespValue::integer(0) } else { RespValue::integer(-1) };
+                return if bit == 0 {
+                    RespValue::integer(0)
+                } else {
+                    RespValue::integer(-1)
+                };
             }
             Err(e) => return map_err(e),
         };
@@ -1292,15 +1375,27 @@ impl CommandHandler for BitPosCommand {
                 None => return not_integer(),
             };
             // Check for BIT mode (may be in args[5] or args[4] if no end given)
-            let bit_mode = args.iter().skip(4).any(|a| a.as_str().map(|s| s.to_uppercase() == "BIT").unwrap_or(false));
+            let bit_mode = args.iter().skip(4).any(|a| {
+                a.as_str()
+                    .map(|s| s.to_uppercase() == "BIT")
+                    .unwrap_or(false)
+            });
 
             if bit_mode {
                 let total_bits = (val.len() * 8) as i64;
-                let norm_start = if start < 0 { (total_bits + start).max(0) } else { start.min(total_bits) };
+                let norm_start = if start < 0 {
+                    (total_bits + start).max(0)
+                } else {
+                    start.min(total_bits)
+                };
                 let norm_end = if args.len() >= 5 {
                     // check if args[4] is a number (not BYTE/BIT)
                     if let Some(e) = args[4].as_str().and_then(|s| s.parse::<i64>().ok()) {
-                        if e < 0 { (total_bits + e).max(-1) } else { e.min(total_bits - 1) }
+                        if e < 0 {
+                            (total_bits + e).max(-1)
+                        } else {
+                            e.min(total_bits - 1)
+                        }
                     } else {
                         total_bits - 1
                     }
@@ -1317,15 +1412,27 @@ impl CommandHandler for BitPosCommand {
                         }
                     }
                 }
-                return if bit == 0 { RespValue::integer(total_bits) } else { RespValue::integer(-1) };
+                return if bit == 0 {
+                    RespValue::integer(total_bits)
+                } else {
+                    RespValue::integer(-1)
+                };
             }
 
             // BYTE mode (default)
             let len = val.len() as i64;
-            let norm_start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
+            let norm_start = if start < 0 {
+                (len + start).max(0)
+            } else {
+                start.min(len)
+            } as usize;
             let norm_end = if args.len() >= 5 {
                 if let Some(e) = args[4].as_str().and_then(|s| s.parse::<i64>().ok()) {
-                    (if e < 0 { (len + e).max(-1) } else { e.min(len - 1) }) as usize
+                    (if e < 0 {
+                        (len + e).max(-1)
+                    } else {
+                        e.min(len - 1)
+                    }) as usize
                 } else {
                     (len - 1).max(0) as usize
                 }
@@ -1334,7 +1441,11 @@ impl CommandHandler for BitPosCommand {
             };
 
             if norm_start > norm_end || norm_start >= val.len() {
-                return if bit == 0 { RespValue::integer((val.len() * 8) as i64) } else { RespValue::integer(-1) };
+                return if bit == 0 {
+                    RespValue::integer((val.len() * 8) as i64)
+                } else {
+                    RespValue::integer(-1)
+                };
             }
             let search_slice = &val[norm_start..=norm_end.min(val.len() - 1)];
             for (byte_idx, &byte) in search_slice.iter().enumerate() {
@@ -1346,7 +1457,11 @@ impl CommandHandler for BitPosCommand {
                     }
                 }
             }
-            return if bit == 0 { RespValue::integer((val.len() * 8) as i64) } else { RespValue::integer(-1) };
+            return if bit == 0 {
+                RespValue::integer((val.len() * 8) as i64)
+            } else {
+                RespValue::integer(-1)
+            };
         }
 
         // No range — search all
@@ -1373,14 +1488,26 @@ pub struct BitFieldCommand {
 }
 
 #[derive(Clone, Copy)]
-enum BitfieldOverflow { Wrap, Sat, Fail }
+enum BitfieldOverflow {
+    Wrap,
+    Sat,
+    Fail,
+}
 
 fn bitfield_parse_type(s: &str) -> Option<(bool, u8)> {
     // returns (signed, bits)
     if s.starts_with('u') || s.starts_with('U') {
-        s[1..].parse::<u8>().ok().filter(|&b| b >= 1 && b <= 63).map(|b| (false, b))
+        s[1..]
+            .parse::<u8>()
+            .ok()
+            .filter(|&b| b >= 1 && b <= 63)
+            .map(|b| (false, b))
     } else if s.starts_with('i') || s.starts_with('I') {
-        s[1..].parse::<u8>().ok().filter(|&b| b >= 1 && b <= 64).map(|b| (true, b))
+        s[1..]
+            .parse::<u8>()
+            .ok()
+            .filter(|&b| b >= 1 && b <= 64)
+            .map(|b| (true, b))
     } else {
         None
     }
@@ -1404,16 +1531,28 @@ fn bitfield_get_bits(buf: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64
 
 fn bitfield_set_bits(buf: &mut Vec<u8>, bit_offset: u64, bits: u8, value: u64) {
     let needed = ((bit_offset + bits as u64 + 7) / 8) as usize;
-    if buf.len() < needed { buf.resize(needed, 0); }
+    if buf.len() < needed {
+        buf.resize(needed, 0);
+    }
     for i in 0..bits as u64 {
         let byte_idx = ((bit_offset + i) / 8) as usize;
         let bit_idx = 7 - ((bit_offset + i) % 8);
         let src_bit = (value >> (bits as u64 - 1 - i)) & 1;
-        if src_bit == 1 { buf[byte_idx] |= 1 << bit_idx; } else { buf[byte_idx] &= !(1 << bit_idx); }
+        if src_bit == 1 {
+            buf[byte_idx] |= 1 << bit_idx;
+        } else {
+            buf[byte_idx] &= !(1 << bit_idx);
+        }
     }
 }
 
-fn bitfield_overflow(old: i64, delta: i64, signed: bool, bits: u8, overflow: BitfieldOverflow) -> Option<i64> {
+fn bitfield_overflow(
+    old: i64,
+    delta: i64,
+    signed: bool,
+    bits: u8,
+    overflow: BitfieldOverflow,
+) -> Option<i64> {
     if signed {
         let min = -(1i64 << (bits - 1));
         let max = (1i64 << (bits - 1)) - 1;
@@ -1423,34 +1562,66 @@ fn bitfield_overflow(old: i64, delta: i64, signed: bool, bits: u8, overflow: Bit
                 // wrap within signed range
                 let range = 1i64 << bits;
                 let mut r = result % range;
-                if r > max { r -= range; }
-                if r < min { r += range; }
+                if r > max {
+                    r -= range;
+                }
+                if r < min {
+                    r += range;
+                }
                 Some(r)
             }
             BitfieldOverflow::Sat => Some(result.max(min).min(max)),
-            BitfieldOverflow::Fail => if result < min || result > max { None } else { Some(result) },
+            BitfieldOverflow::Fail => {
+                if result < min || result > max {
+                    None
+                } else {
+                    Some(result)
+                }
+            }
         }
     } else {
-        let max = if bits == 63 { i64::MAX as u64 } else { (1u64 << bits) - 1 };
+        let max = if bits == 63 {
+            i64::MAX as u64
+        } else {
+            (1u64 << bits) - 1
+        };
         let old_u = old as u64;
         let (result_u, overflow_happened) = old_u.overflowing_add(delta as u64);
         match overflow {
             BitfieldOverflow::Wrap => Some((result_u & max) as i64),
             BitfieldOverflow::Sat => {
-                if delta > 0 && overflow_happened { Some(max as i64) }
-                else if delta < 0 && (result_u > max || overflow_happened) { Some(0) }
-                else { Some((result_u & max) as i64) }
+                if delta > 0 && overflow_happened {
+                    Some(max as i64)
+                } else if delta < 0 && (result_u > max || overflow_happened) {
+                    Some(0)
+                } else {
+                    Some((result_u & max) as i64)
+                }
             }
             BitfieldOverflow::Fail => {
-                if overflow_happened || result_u > max { None } else { Some(result_u as i64) }
+                if overflow_happened || result_u > max {
+                    None
+                } else {
+                    Some(result_u as i64)
+                }
             }
         }
     }
 }
 
-fn execute_bitfield(db: &Arc<RedisDatabase>, db_index: usize, args: &[RespValue], readonly: bool) -> RespValue {
-    if args.len() < 2 { return RespValue::error("ERR wrong number of arguments for 'bitfield' command"); }
-    let key = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::error("ERR invalid key") };
+fn execute_bitfield(
+    db: &Arc<RedisDatabase>,
+    db_index: usize,
+    args: &[RespValue],
+    readonly: bool,
+) -> RespValue {
+    if args.len() < 2 {
+        return RespValue::error("ERR wrong number of arguments for 'bitfield' command");
+    }
+    let key = match args[1].as_bytes() {
+        Some(k) => k.to_vec(),
+        None => return RespValue::error("ERR invalid key"),
+    };
 
     // Load current string value
     let mut buf: Vec<u8> = match db.string_get(db_index, &key) {
@@ -1466,7 +1637,10 @@ fn execute_bitfield(db: &Arc<RedisDatabase>, db_index: usize, args: &[RespValue]
     while i < args.len() {
         let op = match args[i].as_str().map(|s| s.to_uppercase()) {
             Some(s) => s,
-            None => { i += 1; continue; }
+            None => {
+                i += 1;
+                continue;
+            }
         };
         match op.as_str() {
             "OVERFLOW" => {
@@ -1482,47 +1656,128 @@ fn execute_bitfield(db: &Arc<RedisDatabase>, db_index: usize, args: &[RespValue]
             }
             "GET" => {
                 i += 1;
-                if i + 1 >= args.len() { break; }
-                let type_str = match args[i].as_str() { Some(s) => s.to_string(), None => { i += 2; continue; } };
-                let bit_offset: u64 = match args[i+1].as_str().and_then(|s| s.parse().ok()) { Some(n) => n, None => { i += 2; continue; } };
+                if i + 1 >= args.len() {
+                    break;
+                }
+                let type_str = match args[i].as_str() {
+                    Some(s) => s.to_string(),
+                    None => {
+                        i += 2;
+                        continue;
+                    }
+                };
+                let bit_offset: u64 = match args[i + 1].as_str().and_then(|s| s.parse().ok()) {
+                    Some(n) => n,
+                    None => {
+                        i += 2;
+                        continue;
+                    }
+                };
                 i += 2;
-                let (signed, bits) = match bitfield_parse_type(&type_str) { Some(v) => v, None => continue };
-                results.push(RespValue::integer(bitfield_get_bits(&buf, bit_offset, bits, signed)));
+                let (signed, bits) = match bitfield_parse_type(&type_str) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                results.push(RespValue::integer(bitfield_get_bits(
+                    &buf, bit_offset, bits, signed,
+                )));
             }
             "SET" => {
-                if readonly { i += 3; continue; }
+                if readonly {
+                    i += 3;
+                    continue;
+                }
                 i += 1;
-                if i + 2 >= args.len() { break; }
-                let type_str = match args[i].as_str() { Some(s) => s.to_string(), None => { i += 3; continue; } };
-                let bit_offset: u64 = match args[i+1].as_str().and_then(|s| s.parse().ok()) { Some(n) => n, None => { i += 3; continue; } };
-                let new_val: i64 = match args[i+2].as_str().and_then(|s| s.parse().ok()) { Some(n) => n, None => { i += 3; continue; } };
+                if i + 2 >= args.len() {
+                    break;
+                }
+                let type_str = match args[i].as_str() {
+                    Some(s) => s.to_string(),
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
+                let bit_offset: u64 = match args[i + 1].as_str().and_then(|s| s.parse().ok()) {
+                    Some(n) => n,
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
+                let new_val: i64 = match args[i + 2].as_str().and_then(|s| s.parse().ok()) {
+                    Some(n) => n,
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
                 i += 3;
-                let (signed, bits) = match bitfield_parse_type(&type_str) { Some(v) => v, None => continue };
+                let (signed, bits) = match bitfield_parse_type(&type_str) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let old_val = bitfield_get_bits(&buf, bit_offset, bits, signed);
-                let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                let mask = if bits == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
                 bitfield_set_bits(&mut buf, bit_offset, bits, new_val as u64 & mask);
                 results.push(RespValue::integer(old_val));
             }
             "INCRBY" => {
-                if readonly { i += 3; continue; }
+                if readonly {
+                    i += 3;
+                    continue;
+                }
                 i += 1;
-                if i + 2 >= args.len() { break; }
-                let type_str = match args[i].as_str() { Some(s) => s.to_string(), None => { i += 3; continue; } };
-                let bit_offset: u64 = match args[i+1].as_str().and_then(|s| s.parse().ok()) { Some(n) => n, None => { i += 3; continue; } };
-                let delta: i64 = match args[i+2].as_str().and_then(|s| s.parse().ok()) { Some(n) => n, None => { i += 3; continue; } };
+                if i + 2 >= args.len() {
+                    break;
+                }
+                let type_str = match args[i].as_str() {
+                    Some(s) => s.to_string(),
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
+                let bit_offset: u64 = match args[i + 1].as_str().and_then(|s| s.parse().ok()) {
+                    Some(n) => n,
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
+                let delta: i64 = match args[i + 2].as_str().and_then(|s| s.parse().ok()) {
+                    Some(n) => n,
+                    None => {
+                        i += 3;
+                        continue;
+                    }
+                };
                 i += 3;
-                let (signed, bits) = match bitfield_parse_type(&type_str) { Some(v) => v, None => continue };
+                let (signed, bits) = match bitfield_parse_type(&type_str) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let old_val = bitfield_get_bits(&buf, bit_offset, bits, signed);
                 match bitfield_overflow(old_val, delta, signed, bits, overflow) {
                     Some(new_val) => {
-                        let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                        let mask = if bits == 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << bits) - 1
+                        };
                         bitfield_set_bits(&mut buf, bit_offset, bits, new_val as u64 & mask);
                         results.push(RespValue::integer(new_val));
                     }
                     None => results.push(RespValue::null_bulk()),
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -1537,7 +1792,9 @@ fn execute_bitfield(db: &Arc<RedisDatabase>, db_index: usize, args: &[RespValue]
 }
 
 impl CommandHandler for BitFieldCommand {
-    fn name(&self) -> &str { "BITFIELD" }
+    fn name(&self) -> &str {
+        "BITFIELD"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         execute_bitfield(&self.db, *db_index, args, false)
     }
@@ -1548,7 +1805,9 @@ pub struct BitFieldRoCommand {
 }
 
 impl CommandHandler for BitFieldRoCommand {
-    fn name(&self) -> &str { "BITFIELD_RO" }
+    fn name(&self) -> &str {
+        "BITFIELD_RO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         execute_bitfield(&self.db, *db_index, args, true)
     }
@@ -1559,14 +1818,22 @@ pub struct LcsCommand {
 }
 
 impl CommandHandler for LcsCommand {
-    fn name(&self) -> &str { "LCS" }
+    fn name(&self) -> &str {
+        "LCS"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // LCS key1 key2 [LEN] [IDX [MINMATCHLEN min] [WITHMATCHLEN]]
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'lcs' command");
         }
-        let key1 = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::error("ERR invalid key") };
-        let key2 = match args[2].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::error("ERR invalid key") };
+        let key1 = match args[1].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::error("ERR invalid key"),
+        };
+        let key2 = match args[2].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::error("ERR invalid key"),
+        };
 
         let s1 = match self.db.string_get(*db_index, &key1) {
             Ok(Some(v)) => v,
@@ -1579,7 +1846,10 @@ impl CommandHandler for LcsCommand {
             Err(e) => return map_err(e),
         };
 
-        let flags: Vec<String> = args[3..].iter().filter_map(|a| a.as_str().map(|s| s.to_uppercase())).collect();
+        let flags: Vec<String> = args[3..]
+            .iter()
+            .filter_map(|a| a.as_str().map(|s| s.to_uppercase()))
+            .collect();
         let len_only = flags.contains(&"LEN".to_string());
         let idx_mode = flags.contains(&"IDX".to_string());
         let withmatchlen = flags.contains(&"WITHMATCHLEN".to_string());
@@ -1587,7 +1857,7 @@ impl CommandHandler for LcsCommand {
             let mut m = 0usize;
             for i in 0..flags.len() {
                 if flags[i] == "MINMATCHLEN" && i + 1 < flags.len() {
-                    m = flags[i+1].parse().unwrap_or(0);
+                    m = flags[i + 1].parse().unwrap_or(0);
                 }
             }
             m
@@ -1599,10 +1869,10 @@ impl CommandHandler for LcsCommand {
         let mut dp = vec![vec![0usize; m + 1]; n + 1];
         for i in 1..=n {
             for j in 1..=m {
-                if s1[i-1] == s2[j-1] {
-                    dp[i][j] = dp[i-1][j-1] + 1;
+                if s1[i - 1] == s2[j - 1] {
+                    dp[i][j] = dp[i - 1][j - 1] + 1;
                 } else {
-                    dp[i][j] = dp[i-1][j].max(dp[i][j-1]);
+                    dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
                 }
             }
         }
@@ -1624,7 +1894,7 @@ impl CommandHandler for LcsCommand {
             let mut current_len = 0usize;
 
             while i2 > 0 && j2 > 0 {
-                if s1[i2-1] == s2[j2-1] {
+                if s1[i2 - 1] == s2[j2 - 1] {
                     if !in_match {
                         match_s1_end = i2 - 1;
                         match_s2_end = j2 - 1;
@@ -1633,7 +1903,7 @@ impl CommandHandler for LcsCommand {
                     } else {
                         current_len += 1;
                     }
-                    lcs_bytes.push(s1[i2-1]);
+                    lcs_bytes.push(s1[i2 - 1]);
                     i2 -= 1;
                     j2 -= 1;
                 } else {
@@ -1641,12 +1911,18 @@ impl CommandHandler for LcsCommand {
                         let s1_start = i2;
                         let s2_start = j2;
                         if current_len >= minmatchlen {
-                            temp_matches.push((s1_start, match_s1_end, s2_start, match_s2_end, current_len));
+                            temp_matches.push((
+                                s1_start,
+                                match_s1_end,
+                                s2_start,
+                                match_s2_end,
+                                current_len,
+                            ));
                         }
                         in_match = false;
                         current_len = 0;
                     }
-                    if dp[i2-1][j2] > dp[i2][j2-1] {
+                    if dp[i2 - 1][j2] > dp[i2][j2 - 1] {
                         i2 -= 1;
                     } else {
                         j2 -= 1;
@@ -1661,21 +1937,28 @@ impl CommandHandler for LcsCommand {
             lcs_bytes.reverse();
 
             // Build IDX response: {matches: [...], len: N}
-            let match_resp: Vec<RespValue> = temp_matches.iter().map(|(s1s, s1e, s2s, s2e, mlen)| {
-                let s1_range = RespValue::Array(Some(vec![
-                    RespValue::integer(*s1s as i64),
-                    RespValue::integer(*s1e as i64),
-                ]));
-                let s2_range = RespValue::Array(Some(vec![
-                    RespValue::integer(*s2s as i64),
-                    RespValue::integer(*s2e as i64),
-                ]));
-                if withmatchlen {
-                    RespValue::Array(Some(vec![s1_range, s2_range, RespValue::integer(*mlen as i64)]))
-                } else {
-                    RespValue::Array(Some(vec![s1_range, s2_range]))
-                }
-            }).collect();
+            let match_resp: Vec<RespValue> = temp_matches
+                .iter()
+                .map(|(s1s, s1e, s2s, s2e, mlen)| {
+                    let s1_range = RespValue::Array(Some(vec![
+                        RespValue::integer(*s1s as i64),
+                        RespValue::integer(*s1e as i64),
+                    ]));
+                    let s2_range = RespValue::Array(Some(vec![
+                        RespValue::integer(*s2s as i64),
+                        RespValue::integer(*s2e as i64),
+                    ]));
+                    if withmatchlen {
+                        RespValue::Array(Some(vec![
+                            s1_range,
+                            s2_range,
+                            RespValue::integer(*mlen as i64),
+                        ]))
+                    } else {
+                        RespValue::Array(Some(vec![s1_range, s2_range]))
+                    }
+                })
+                .collect();
 
             return RespValue::Array(Some(vec![
                 RespValue::bulk_str("matches"),
@@ -1690,11 +1973,11 @@ impl CommandHandler for LcsCommand {
         let mut i = n;
         let mut j = m;
         while i > 0 && j > 0 {
-            if s1[i-1] == s2[j-1] {
-                result.push(s1[i-1]);
+            if s1[i - 1] == s2[j - 1] {
+                result.push(s1[i - 1]);
                 i -= 1;
                 j -= 1;
-            } else if dp[i-1][j] > dp[i][j-1] {
+            } else if dp[i - 1][j] > dp[i][j - 1] {
                 i -= 1;
             } else {
                 j -= 1;

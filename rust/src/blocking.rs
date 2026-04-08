@@ -4,7 +4,6 @@
 /// broadcasts (db, key) so that waiting BLPOP clients can wake up and
 /// attempt to pop.  The broadcast approach is simple, correct, and
 /// requires no per-command structs to carry extra fields.
-
 use lazy_static::lazy_static;
 use tokio::sync::broadcast;
 

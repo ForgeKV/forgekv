@@ -267,6 +267,21 @@ impl TcpServer {
     }
 }
 
+fn noperm_response() -> RespValue {
+    RespValue::error("NOPERM this user has no permissions to run the command")
+}
+
+fn acl_client_info(
+    client_registry: &ClientRegistry,
+    client_id: u64,
+    fallback_user: &str,
+) -> String {
+    client_registry
+        .get(client_id)
+        .map(|info| format!("id={} addr={} user={}", info.id, info.addr, info.username))
+        .unwrap_or_else(|| format!("id={} user={}", client_id, fallback_user))
+}
+
 // Internal message type for the subscriber aggregator channel.
 enum AggMsg {
     Channel(PubSubMessage),
@@ -344,6 +359,10 @@ async fn handle_client(
                                             &args, &acl, &requirepass,
                                             &mut authenticated, &mut username,
                                         );
+                                        client_registry.update(client_id, |info| {
+                                            info.authenticated = authenticated;
+                                            info.username = username.clone();
+                                        });
                                         if write_resp(&mut writer, &response).await.is_err() { let _ = writer.flush().await; return; }
                                         continue;
                                     }
@@ -355,6 +374,11 @@ async fn handle_client(
                                             &mut authenticated, &mut username,
                                             &mut resp_version, &client_name, client_id, db_index,
                                         );
+                                        client_registry.update(client_id, |info| {
+                                            info.authenticated = authenticated;
+                                            info.username = username.clone();
+                                            info.resp_version = resp_version;
+                                        });
                                         if write_resp(&mut writer, &response).await.is_err() { let _ = writer.flush().await; return; }
                                         if cmd_upper == "QUIT" { let _ = writer.flush().await; return; }
                                         continue;
@@ -364,6 +388,26 @@ async fn handle_client(
                                     if !authenticated {
                                         let err = RespValue::error("NOAUTH Authentication required.");
                                         if write_resp(&mut writer, &err).await.is_err() { let _ = writer.flush().await; return; }
+                                        continue;
+                                    }
+
+                                    if !acl.is_command_allowed(&username, &cmd_upper) {
+                                        let client_info = acl_client_info(&client_registry, client_id, &username);
+                                        acl.log_entry("command", &cmd_upper.to_lowercase(), &username, &client_info);
+                                        let err = noperm_response();
+                                        if write_resp(&mut writer, &err).await.is_err() { let _ = writer.flush().await; return; }
+                                        continue;
+                                    }
+
+                                    if cmd_upper == "ACL"
+                                        && args
+                                            .get(1)
+                                            .and_then(|a| a.as_str())
+                                            .map(|s| s.eq_ignore_ascii_case("WHOAMI"))
+                                            .unwrap_or(false)
+                                    {
+                                        let response = RespValue::bulk_str(&username);
+                                        if write_resp(&mut writer, &response).await.is_err() { let _ = writer.flush().await; return; }
                                         continue;
                                     }
 
@@ -455,7 +499,19 @@ async fn handle_client(
                                             let cmds = std::mem::take(&mut queued_cmds);
                                             let results: Vec<RespValue> = cmds
                                                 .iter()
-                                                .map(|c| registry.execute(&mut db_index, c))
+                                                .map(|c| {
+                                                    let queued_cmd = c.get(0)
+                                                        .and_then(|a| a.as_str())
+                                                        .map(|s| s.to_uppercase())
+                                                        .unwrap_or_default();
+                                                    if !acl.is_command_allowed(&username, &queued_cmd) {
+                                                        let client_info = acl_client_info(&client_registry, client_id, &username);
+                                                        acl.log_entry("command", &queued_cmd.to_lowercase(), &username, &client_info);
+                                                        noperm_response()
+                                                    } else {
+                                                        registry.execute(&mut db_index, c)
+                                                    }
+                                                })
                                                 .collect();
                                             RespValue::Array(Some(results))
                                         }
@@ -548,7 +604,10 @@ async fn handle_blocking_cmd(
     match cmd {
         "BLPOP" | "BRPOP" => {
             if args.len() < 3 {
-                return RespValue::error(&format!("ERR wrong number of arguments for '{}' command", cmd.to_lowercase()));
+                return RespValue::error(&format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    cmd.to_lowercase()
+                ));
             }
             let is_left = cmd == "BLPOP";
             let keys: Vec<Vec<u8>> = args[1..args.len() - 1]
@@ -570,7 +629,11 @@ async fn handle_blocking_cmd(
             // Helper: try popping from each key in order
             let try_pop = |keys: &[Vec<u8>]| -> Option<RespValue> {
                 for key in keys {
-                    let res = if is_left { db.lpop(db_index, key) } else { db.rpop(db_index, key) };
+                    let res = if is_left {
+                        db.lpop(db_index, key)
+                    } else {
+                        db.rpop(db_index, key)
+                    };
                     if let Ok(Some(val)) = res {
                         return Some(RespValue::Array(Some(vec![
                             RespValue::bulk_bytes(key.clone()),
@@ -617,8 +680,12 @@ async fn handle_blocking_cmd(
 
                 match notif_result {
                     Ok((notif_db, notif_key)) => {
-                        if notif_db != db_index { continue; }
-                        if !keys.contains(&notif_key) { continue; }
+                        if notif_db != db_index {
+                            continue;
+                        }
+                        if !keys.contains(&notif_key) {
+                            continue;
+                        }
                         if let Some(r) = try_pop(&keys) {
                             return r;
                         }
@@ -638,23 +705,37 @@ async fn handle_blocking_cmd(
             if args.len() < 4 {
                 return RespValue::error("ERR wrong number of arguments for 'brpoplpush' command");
             }
-            let src = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-            let dst = match args[2].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
+            let src = match args[1].as_bytes() {
+                Some(k) => k.to_vec(),
+                None => return RespValue::null_bulk(),
+            };
+            let dst = match args[2].as_bytes() {
+                Some(k) => k.to_vec(),
+                None => return RespValue::null_bulk(),
+            };
             let timeout_secs: f64 = args[3].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-            let try_move = || db.lmove(db_index, &src, &dst, false, true)
-                .ok()
-                .flatten()
-                .map(|v| RespValue::bulk_bytes(v));
+            let try_move = || {
+                db.lmove(db_index, &src, &dst, false, true)
+                    .ok()
+                    .flatten()
+                    .map(|v| RespValue::bulk_bytes(v))
+            };
 
-            if let Some(r) = try_move() { return r; }
+            if let Some(r) = try_move() {
+                return r;
+            }
 
             let mut sub = BLOCKING_NOTIFIER.subscribe();
-            if let Some(r) = try_move() { return r; }
+            if let Some(r) = try_move() {
+                return r;
+            }
 
             let deadline = if timeout_secs > 0.0 {
                 Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout_secs))
-            } else { None };
+            } else {
+                None
+            };
 
             loop {
                 let notif = if let Some(dl) = deadline {
@@ -670,12 +751,16 @@ async fn handle_blocking_cmd(
                 };
                 match notif {
                     Ok((notif_db, notif_key)) if notif_db == db_index && notif_key == src => {
-                        if let Some(r) = try_move() { return r; }
+                        if let Some(r) = try_move() {
+                            return r;
+                        }
                     }
                     Ok(_) => continue,
                     Err(_) => {
                         sub = BLOCKING_NOTIFIER.subscribe();
-                        if let Some(r) = try_move() { return r; }
+                        if let Some(r) = try_move() {
+                            return r;
+                        }
                     }
                 }
             }
@@ -685,26 +770,46 @@ async fn handle_blocking_cmd(
             if args.len() < 6 {
                 return RespValue::error("ERR wrong number of arguments for 'blmove' command");
             }
-            let src = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-            let dst = match args[2].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-            let wherefrom = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
-            let whereto   = args[4].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let src = match args[1].as_bytes() {
+                Some(k) => k.to_vec(),
+                None => return RespValue::null_bulk(),
+            };
+            let dst = match args[2].as_bytes() {
+                Some(k) => k.to_vec(),
+                None => return RespValue::null_bulk(),
+            };
+            let wherefrom = args[3]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
+            let whereto = args[4]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let left_from = wherefrom == "LEFT";
-            let left_to   = whereto   == "LEFT";
+            let left_to = whereto == "LEFT";
             let timeout_secs: f64 = args[5].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-            let try_move = || db.lmove(db_index, &src, &dst, left_from, left_to)
-                .ok()
-                .flatten()
-                .map(|v| RespValue::bulk_bytes(v));
+            let try_move = || {
+                db.lmove(db_index, &src, &dst, left_from, left_to)
+                    .ok()
+                    .flatten()
+                    .map(|v| RespValue::bulk_bytes(v))
+            };
 
-            if let Some(r) = try_move() { return r; }
+            if let Some(r) = try_move() {
+                return r;
+            }
             let mut sub = BLOCKING_NOTIFIER.subscribe();
-            if let Some(r) = try_move() { return r; }
+            if let Some(r) = try_move() {
+                return r;
+            }
 
             let deadline = if timeout_secs > 0.0 {
                 Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout_secs))
-            } else { None };
+            } else {
+                None
+            };
 
             loop {
                 let notif = if let Some(dl) = deadline {
@@ -720,12 +825,16 @@ async fn handle_blocking_cmd(
                 };
                 match notif {
                     Ok((notif_db, notif_key)) if notif_db == db_index && notif_key == src => {
-                        if let Some(r) = try_move() { return r; }
+                        if let Some(r) = try_move() {
+                            return r;
+                        }
                     }
                     Ok(_) => continue,
                     Err(_) => {
                         sub = BLOCKING_NOTIFIER.subscribe();
-                        if let Some(r) = try_move() { return r; }
+                        if let Some(r) = try_move() {
+                            return r;
+                        }
                     }
                 }
             }
@@ -747,19 +856,35 @@ async fn handle_blocking_cmd(
                 .iter()
                 .filter_map(|a| a.as_bytes().map(|b| b.to_vec()))
                 .collect();
-            let direction = args[3 + numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let direction = args[3 + numkeys]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let is_left = direction == "LEFT";
             let count: usize = if args.len() > 3 + numkeys + 2 {
-                if args[3 + numkeys + 1].as_str().map(|s| s.to_uppercase()) == Some("COUNT".to_string()) {
-                    args[3 + numkeys + 2].as_str().and_then(|s| s.parse().ok()).unwrap_or(1)
-                } else { 1 }
-            } else { 1 };
+                if args[3 + numkeys + 1].as_str().map(|s| s.to_uppercase())
+                    == Some("COUNT".to_string())
+                {
+                    args[3 + numkeys + 2]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1)
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
 
             let try_pop_many = |keys: &[Vec<u8>]| -> Option<RespValue> {
                 for key in keys {
                     let mut popped = Vec::new();
                     for _ in 0..count {
-                        let res = if is_left { db.lpop(db_index, key) } else { db.rpop(db_index, key) };
+                        let res = if is_left {
+                            db.lpop(db_index, key)
+                        } else {
+                            db.rpop(db_index, key)
+                        };
                         match res {
                             Ok(Some(v)) => popped.push(RespValue::bulk_bytes(v)),
                             _ => break,
@@ -775,13 +900,19 @@ async fn handle_blocking_cmd(
                 None
             };
 
-            if let Some(r) = try_pop_many(&keys) { return r; }
+            if let Some(r) = try_pop_many(&keys) {
+                return r;
+            }
             let mut sub = BLOCKING_NOTIFIER.subscribe();
-            if let Some(r) = try_pop_many(&keys) { return r; }
+            if let Some(r) = try_pop_many(&keys) {
+                return r;
+            }
 
             let deadline = if timeout_secs > 0.0 {
                 Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout_secs))
-            } else { None };
+            } else {
+                None
+            };
 
             loop {
                 let notif = if let Some(dl) = deadline {
@@ -797,13 +928,21 @@ async fn handle_blocking_cmd(
                 };
                 match notif {
                     Ok((notif_db, notif_key)) => {
-                        if notif_db != db_index { continue; }
-                        if !keys.contains(&notif_key) { continue; }
-                        if let Some(r) = try_pop_many(&keys) { return r; }
+                        if notif_db != db_index {
+                            continue;
+                        }
+                        if !keys.contains(&notif_key) {
+                            continue;
+                        }
+                        if let Some(r) = try_pop_many(&keys) {
+                            return r;
+                        }
                     }
                     Err(_) => {
                         sub = BLOCKING_NOTIFIER.subscribe();
-                        if let Some(r) = try_pop_many(&keys) { return r; }
+                        if let Some(r) = try_pop_many(&keys) {
+                            return r;
+                        }
                     }
                 }
             }
@@ -811,7 +950,10 @@ async fn handle_blocking_cmd(
         "BZPOPMIN" | "BZPOPMAX" => {
             // BZPOPMIN key [key ...] timeout
             if args.len() < 3 {
-                return RespValue::error(&format!("ERR wrong number of arguments for '{}' command", cmd.to_lowercase()));
+                return RespValue::error(&format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    cmd.to_lowercase()
+                ));
             }
             let is_min = cmd == "BZPOPMIN";
             let keys: Vec<Vec<u8>> = args[1..args.len() - 1]
@@ -895,8 +1037,12 @@ async fn handle_blocking_cmd(
 
                 match notif_result {
                     Ok((notif_db, notif_key)) => {
-                        if notif_db != db_index { continue; }
-                        if !keys.contains(&notif_key) { continue; }
+                        if notif_db != db_index {
+                            continue;
+                        }
+                        if !keys.contains(&notif_key) {
+                            continue;
+                        }
                         if let Some(r) = try_zpop(&keys) {
                             return r;
                         }
@@ -931,16 +1077,26 @@ async fn handle_blocking_cmd(
                 .iter()
                 .filter_map(|a| a.as_bytes().map(|b| b.to_vec()))
                 .collect();
-            let direction = args[3 + numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let direction = args[3 + numkeys]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let pop_min = direction == "MIN";
             let count: i64 = {
                 let rest = &args[4 + numkeys..];
                 let mut c = 1i64;
                 let mut i = 0;
                 while i < rest.len() {
-                    if rest[i].as_str().map(|s| s.to_uppercase() == "COUNT").unwrap_or(false) {
+                    if rest[i]
+                        .as_str()
+                        .map(|s| s.to_uppercase() == "COUNT")
+                        .unwrap_or(false)
+                    {
                         if i + 1 < rest.len() {
-                            c = rest[i + 1].as_str().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            c = rest[i + 1]
+                                .as_str()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(1);
                         }
                     }
                     i += 1;
@@ -949,21 +1105,24 @@ async fn handle_blocking_cmd(
             };
 
             let build_result = |key: Vec<u8>, items: Vec<(Vec<u8>, f64)>| -> RespValue {
-                let elements: Vec<RespValue> = items.into_iter().map(|(member, score)| {
-                    let score_str = if score == f64::INFINITY {
-                        "inf".to_string()
-                    } else if score == f64::NEG_INFINITY {
-                        "-inf".to_string()
-                    } else if score == score.floor() && score.abs() < 1e15 {
-                        format!("{}", score as i64)
-                    } else {
-                        format!("{}", score)
-                    };
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_bytes(member),
-                        RespValue::bulk_str(&score_str),
-                    ]))
-                }).collect();
+                let elements: Vec<RespValue> = items
+                    .into_iter()
+                    .map(|(member, score)| {
+                        let score_str = if score == f64::INFINITY {
+                            "inf".to_string()
+                        } else if score == f64::NEG_INFINITY {
+                            "-inf".to_string()
+                        } else if score == score.floor() && score.abs() < 1e15 {
+                            format!("{}", score as i64)
+                        } else {
+                            format!("{}", score)
+                        };
+                        RespValue::Array(Some(vec![
+                            RespValue::bulk_bytes(member),
+                            RespValue::bulk_str(&score_str),
+                        ]))
+                    })
+                    .collect();
                 RespValue::Array(Some(vec![
                     RespValue::bulk_bytes(key),
                     RespValue::Array(Some(elements)),
@@ -978,14 +1137,20 @@ async fn handle_blocking_cmd(
                 }
             };
 
-            if let Some(r) = try_zpop_multi(&keys) { return r; }
+            if let Some(r) = try_zpop_multi(&keys) {
+                return r;
+            }
 
             let mut sub = BLOCKING_NOTIFIER.subscribe();
-            if let Some(r) = try_zpop_multi(&keys) { return r; }
+            if let Some(r) = try_zpop_multi(&keys) {
+                return r;
+            }
 
             let deadline = if timeout_secs > 0.0 {
                 Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout_secs))
-            } else { None };
+            } else {
+                None
+            };
 
             loop {
                 let notif = if let Some(dl) = deadline {
@@ -1001,13 +1166,21 @@ async fn handle_blocking_cmd(
                 };
                 match notif {
                     Ok((notif_db, notif_key)) => {
-                        if notif_db != db_index { continue; }
-                        if !keys.contains(&notif_key) { continue; }
-                        if let Some(r) = try_zpop_multi(&keys) { return r; }
+                        if notif_db != db_index {
+                            continue;
+                        }
+                        if !keys.contains(&notif_key) {
+                            continue;
+                        }
+                        if let Some(r) = try_zpop_multi(&keys) {
+                            return r;
+                        }
                     }
                     Err(_) => {
                         sub = BLOCKING_NOTIFIER.subscribe();
-                        if let Some(r) = try_zpop_multi(&keys) { return r; }
+                        if let Some(r) = try_zpop_multi(&keys) {
+                            return r;
+                        }
                     }
                 }
             }
@@ -1089,7 +1262,10 @@ fn handle_hello(
     let mut new_version = *resp_version;
 
     if args.len() >= 2 {
-        let ver: u8 = args[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(*resp_version);
+        let ver: u8 = args[1]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(*resp_version);
         if ver != 2 && ver != 3 {
             return RespValue::error("NOPROTO unsupported protocol version");
         }
@@ -1099,7 +1275,10 @@ fn handle_hello(
     // Process optional AUTH and SETNAME
     let mut i = 2;
     while i < args.len() {
-        let opt = args[i].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let opt = args[i]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         match opt.as_str() {
             "AUTH" => {
                 if i + 2 >= args.len() {
@@ -1164,16 +1343,23 @@ fn handle_client_cmd(
     if args.len() < 2 {
         return RespValue::error("ERR wrong number of arguments for 'client' command");
     }
-    let sub = args[1].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+    let sub = args[1]
+        .as_str()
+        .map(|s| s.to_uppercase())
+        .unwrap_or_default();
     match sub.as_str() {
         "SETNAME" => {
             if args.len() < 3 {
-                return RespValue::error("ERR wrong number of arguments for 'client|setname' command");
+                return RespValue::error(
+                    "ERR wrong number of arguments for 'client|setname' command",
+                );
             }
             let name = args[2].as_str().unwrap_or("");
             // Validate: no spaces or special chars
             if name.chars().any(|c| c == ' ' || c < ' ') {
-                return RespValue::error("ERR Client names cannot contain spaces, newlines or special characters.");
+                return RespValue::error(
+                    "ERR Client names cannot contain spaces, newlines or special characters.",
+                );
             }
             *client_name = name.to_string();
             RespValue::ok()
@@ -1234,13 +1420,19 @@ fn handle_client_cmd(
         }
         "NO-EVICT" => {
             if args.len() >= 3 {
-                *no_evict = args[2].as_str().map(|s| s.to_lowercase() == "on").unwrap_or(false);
+                *no_evict = args[2]
+                    .as_str()
+                    .map(|s| s.to_lowercase() == "on")
+                    .unwrap_or(false);
             }
             RespValue::ok()
         }
         "NO-TOUCH" => {
             if args.len() >= 3 {
-                *no_touch = args[2].as_str().map(|s| s.to_lowercase() == "on").unwrap_or(false);
+                *no_touch = args[2]
+                    .as_str()
+                    .map(|s| s.to_lowercase() == "on")
+                    .unwrap_or(false);
             }
             RespValue::ok()
         }
@@ -1256,16 +1448,14 @@ fn handle_client_cmd(
             // CLIENT TRACKING on/off [REDIRECT id] [PREFIX prefix] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
             RespValue::ok()
         }
-        "TRACKINGINFO" => {
-            RespValue::Array(Some(vec![
-                RespValue::bulk_str("flags"),
-                RespValue::Array(Some(vec![RespValue::bulk_str("off")])),
-                RespValue::bulk_str("redirect"),
-                RespValue::integer(-1),
-                RespValue::bulk_str("prefixes"),
-                RespValue::Array(Some(vec![])),
-            ]))
-        }
+        "TRACKINGINFO" => RespValue::Array(Some(vec![
+            RespValue::bulk_str("flags"),
+            RespValue::Array(Some(vec![RespValue::bulk_str("off")])),
+            RespValue::bulk_str("redirect"),
+            RespValue::integer(-1),
+            RespValue::bulk_str("prefixes"),
+            RespValue::Array(Some(vec![])),
+        ])),
         "UNPAUSE" => RespValue::ok(),
         "PAUSE" => {
             // CLIENT PAUSE timeout [WRITE|ALL]
@@ -1314,9 +1504,16 @@ async fn handle_subscriber_mode(
     let mut pattern_tasks: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
     if !subscribe_channels(
-        initial_args, initial_is_pattern, hub, &agg_tx,
-        &mut channel_tasks, &mut pattern_tasks, writer,
-    ).await {
+        initial_args,
+        initial_is_pattern,
+        hub,
+        &agg_tx,
+        &mut channel_tasks,
+        &mut pattern_tasks,
+        writer,
+    )
+    .await
+    {
         abort_all_tasks(&mut channel_tasks, &mut pattern_tasks);
         return;
     }
@@ -1508,7 +1705,10 @@ async fn subscribe_channels(
     writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
 ) -> bool {
     for i in 1..args.len() {
-        let name = match args[i].as_bytes().and_then(|b| String::from_utf8(b.to_vec()).ok()) {
+        let name = match args[i]
+            .as_bytes()
+            .and_then(|b| String::from_utf8(b.to_vec()).ok())
+        {
             Some(s) => s,
             None => continue,
         };
@@ -1522,7 +1722,14 @@ async fn subscribe_channels(
                     loop {
                         match rx.recv().await {
                             Ok(msg) => {
-                                if tx.send(AggMsg::Pattern { pattern: pattern_clone.clone(), msg }).await.is_err() {
+                                if tx
+                                    .send(AggMsg::Pattern {
+                                        pattern: pattern_clone.clone(),
+                                        msg,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -1530,7 +1737,8 @@ async fn subscribe_channels(
                             Err(_) => break,
                         }
                     }
-                }).abort_handle();
+                })
+                .abort_handle();
                 pattern_tasks.insert(name.clone(), handle);
             }
         } else if !channel_tasks.contains_key(&name) {
@@ -1548,12 +1756,17 @@ async fn subscribe_channels(
                         Err(_) => break,
                     }
                 }
-            }).abort_handle();
+            })
+            .abort_handle();
             channel_tasks.insert(name.clone(), handle);
         }
 
         let total = (channel_tasks.len() + pattern_tasks.len()) as i64;
-        let kind = if is_pattern { "psubscribe" } else { "subscribe" };
+        let kind = if is_pattern {
+            "psubscribe"
+        } else {
+            "subscribe"
+        };
         let conf = RespValue::Array(Some(vec![
             RespValue::bulk_str(kind),
             RespValue::bulk_bytes(name.into_bytes()),
@@ -1582,12 +1795,19 @@ async fn unsubscribe_channels(
     } else {
         args[1..]
             .iter()
-            .filter_map(|a| a.as_bytes().and_then(|b| String::from_utf8(b.to_vec()).ok()))
+            .filter_map(|a| {
+                a.as_bytes()
+                    .and_then(|b| String::from_utf8(b.to_vec()).ok())
+            })
             .collect()
     };
 
     if names.is_empty() {
-        let kind = if is_pattern { "punsubscribe" } else { "unsubscribe" };
+        let kind = if is_pattern {
+            "punsubscribe"
+        } else {
+            "unsubscribe"
+        };
         let resp = RespValue::Array(Some(vec![
             RespValue::bulk_str(kind),
             RespValue::null_bulk(),
@@ -1598,12 +1818,20 @@ async fn unsubscribe_channels(
     }
 
     for name in names {
-        let tasks = if is_pattern { &mut *pattern_tasks } else { &mut *channel_tasks };
+        let tasks = if is_pattern {
+            &mut *pattern_tasks
+        } else {
+            &mut *channel_tasks
+        };
         if let Some(handle) = tasks.remove(&name) {
             handle.abort();
         }
         let total = (channel_tasks.len() + pattern_tasks.len()) as i64;
-        let kind = if is_pattern { "punsubscribe" } else { "unsubscribe" };
+        let kind = if is_pattern {
+            "punsubscribe"
+        } else {
+            "unsubscribe"
+        };
         let conf = RespValue::Array(Some(vec![
             RespValue::bulk_str(kind),
             RespValue::bulk_bytes(name.into_bytes()),

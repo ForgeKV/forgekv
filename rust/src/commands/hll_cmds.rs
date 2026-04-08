@@ -21,7 +21,7 @@ fn map_err(e: crate::database::RedisError) -> RespValue {
 // Error rate ≈ 0.81%.  Compatible with Redis HLL semantics (not binary format).
 
 const HLL_P: usize = 14;
-const HLL_M: usize = 1 << HLL_P;          // 16384
+const HLL_M: usize = 1 << HLL_P; // 16384
 const HLL_REG_BYTES: usize = HLL_M * 6 / 8; // 12288
 const HLL_MAGIC: &[u8] = b"HYLL";
 const HLL_BLOB_LEN: usize = HLL_MAGIC.len() + HLL_REG_BYTES; // 12292
@@ -69,7 +69,11 @@ fn get_register(regs: &[u8], idx: usize) -> u8 {
     let byte0 = bit_start / 8;
     let shift = bit_start % 8;
     let lo = regs[byte0] as u16;
-    let hi = if byte0 + 1 < regs.len() { regs[byte0 + 1] as u16 } else { 0 };
+    let hi = if byte0 + 1 < regs.len() {
+        regs[byte0 + 1] as u16
+    } else {
+        0
+    };
     ((lo | (hi << 8)) >> shift) as u8 & 0x3F
 }
 
@@ -80,7 +84,11 @@ fn set_register(regs: &mut [u8], idx: usize, val: u8) {
     let shift = bit_start % 8;
     let val16 = (val & 0x3F) as u16;
     let lo = regs[byte0] as u16;
-    let hi = if byte0 + 1 < regs.len() { regs[byte0 + 1] as u16 } else { 0 };
+    let hi = if byte0 + 1 < regs.len() {
+        regs[byte0 + 1] as u16
+    } else {
+        0
+    };
     let word = (lo | (hi << 8)) & !((0x3Fu16) << shift) | (val16 << shift);
     regs[byte0] = word as u8;
     if byte0 + 1 < regs.len() {
@@ -189,7 +197,9 @@ pub struct PfAddCommand {
 }
 
 impl CommandHandler for PfAddCommand {
-    fn name(&self) -> &str { "PFADD" }
+    fn name(&self) -> &str {
+        "PFADD"
+    }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
@@ -242,7 +252,9 @@ pub struct PfCountCommand {
 }
 
 impl CommandHandler for PfCountCommand {
-    fn name(&self) -> &str { "PFCOUNT" }
+    fn name(&self) -> &str {
+        "PFCOUNT"
+    }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
@@ -284,7 +296,9 @@ pub struct PfMergeCommand {
 }
 
 impl CommandHandler for PfMergeCommand {
-    fn name(&self) -> &str { "PFMERGE" }
+    fn name(&self) -> &str {
+        "PFMERGE"
+    }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {

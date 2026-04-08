@@ -312,12 +312,18 @@ impl CommandHandler for XAddCommand {
 
         let entry_id = match parse_xadd_id(&id_str, stream.last_id) {
             Some(id) => id,
-            None => return RespValue::error("ERR Invalid stream ID specified as stream command argument"),
+            None => {
+                return RespValue::error(
+                    "ERR Invalid stream ID specified as stream command argument",
+                )
+            }
         };
 
         // Validate ID is greater than last_id (unless it's 0-0 and stream is empty)
         if !stream.entries.is_empty() && entry_id <= stream.last_id {
-            return RespValue::error("ERR The ID specified in XADD is equal or smaller than the target stream top item");
+            return RespValue::error(
+                "ERR The ID specified in XADD is equal or smaller than the target stream top item",
+            );
         }
 
         stream.last_id = entry_id;
@@ -640,18 +646,14 @@ impl CommandHandler for XTrimCommand {
         };
 
         let removed = match strategy.as_str() {
-            "MAXLEN" => {
-                match threshold_str.parse::<usize>() {
-                    Ok(max_count) => trim_maxlen(stream, max_count, approx),
-                    Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
-                }
-            }
-            "MINID" => {
-                match parse_id_bound(&threshold_str) {
-                    Some((min_id, _)) => trim_minid(stream, min_id, approx),
-                    None => return RespValue::error("ERR invalid stream ID"),
-                }
-            }
+            "MAXLEN" => match threshold_str.parse::<usize>() {
+                Ok(max_count) => trim_maxlen(stream, max_count, approx),
+                Err(_) => return RespValue::error("ERR value is not an integer or out of range"),
+            },
+            "MINID" => match parse_id_bound(&threshold_str) {
+                Some((min_id, _)) => trim_minid(stream, min_id, approx),
+                None => return RespValue::error("ERR invalid stream ID"),
+            },
             _ => return RespValue::error("ERR syntax error"),
         };
 
@@ -813,7 +815,9 @@ impl CommandHandler for XGroupCommand {
             "CREATE" => {
                 // XGROUP CREATE key group id [MKSTREAM]
                 if args.len() < 5 {
-                    return RespValue::error("ERR wrong number of arguments for 'xgroup|create' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xgroup|create' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -865,18 +869,23 @@ impl CommandHandler for XGroupCommand {
                     return RespValue::error("BUSYGROUP Consumer Group name already exists");
                 }
 
-                stream.groups.insert(group, ConsumerGroup {
-                    last_id,
-                    pending: Vec::new(),
-                    consumers: HashMap::new(),
-                });
+                stream.groups.insert(
+                    group,
+                    ConsumerGroup {
+                        last_id,
+                        pending: Vec::new(),
+                        consumers: HashMap::new(),
+                    },
+                );
 
                 RespValue::ok()
             }
             "SETID" => {
                 // XGROUP SETID key group id
                 if args.len() < 5 {
-                    return RespValue::error("ERR wrong number of arguments for 'xgroup|setid' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xgroup|setid' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -920,7 +929,9 @@ impl CommandHandler for XGroupCommand {
             "DESTROY" => {
                 // XGROUP DESTROY key group
                 if args.len() < 4 {
-                    return RespValue::error("ERR wrong number of arguments for 'xgroup|destroy' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xgroup|destroy' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -947,7 +958,9 @@ impl CommandHandler for XGroupCommand {
             "CREATECONSUMER" => {
                 // XGROUP CREATECONSUMER key group consumer
                 if args.len() < 5 {
-                    return RespValue::error("ERR wrong number of arguments for 'xgroup|createconsumer' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xgroup|createconsumer' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -984,7 +997,9 @@ impl CommandHandler for XGroupCommand {
             "DELCONSUMER" => {
                 // XGROUP DELCONSUMER key group consumer
                 if args.len() < 5 {
-                    return RespValue::error("ERR wrong number of arguments for 'xgroup|delconsumer' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xgroup|delconsumer' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -1012,13 +1027,20 @@ impl CommandHandler for XGroupCommand {
                 };
 
                 // Count pending messages for this consumer
-                let pending_count = grp.pending.iter().filter(|p| p.consumer == consumer).count();
+                let pending_count = grp
+                    .pending
+                    .iter()
+                    .filter(|p| p.consumer == consumer)
+                    .count();
                 grp.pending.retain(|p| p.consumer != consumer);
                 grp.consumers.remove(&consumer);
 
                 RespValue::integer(pending_count as i64)
             }
-            _ => RespValue::error(&format!("ERR unknown subcommand '{}' for 'xgroup' command", subcommand)),
+            _ => RespValue::error(&format!(
+                "ERR unknown subcommand '{}' for 'xgroup' command",
+                subcommand
+            )),
         }
     }
 }
@@ -1122,7 +1144,13 @@ impl CommandHandler for XReadGroupCommand {
 
             let grp = match stream.groups.get_mut(&group) {
                 Some(g) => g,
-                None => return RespValue::error(&format!("-NOGROUP No such consumer group '{}' for key name '{}'", group, String::from_utf8_lossy(key))),
+                None => {
+                    return RespValue::error(&format!(
+                        "-NOGROUP No such consumer group '{}' for key name '{}'",
+                        group,
+                        String::from_utf8_lossy(key)
+                    ))
+                }
             };
 
             // Ensure consumer exists in group, update last-seen
@@ -1289,8 +1317,12 @@ impl CommandHandler for XClaimCommand {
         while i < args.len() {
             if let Some(s) = args[i].as_str() {
                 let upper = s.to_uppercase();
-                if upper == "IDLE" || upper == "TIME" || upper == "RETRYCOUNT"
-                    || upper == "FORCE" || upper == "JUSTID" || upper == "LASTID"
+                if upper == "IDLE"
+                    || upper == "TIME"
+                    || upper == "RETRYCOUNT"
+                    || upper == "FORCE"
+                    || upper == "JUSTID"
+                    || upper == "LASTID"
                 {
                     break;
                 }
@@ -1315,11 +1347,20 @@ impl CommandHandler for XClaimCommand {
         while i < args.len() {
             let upper = match args[i].as_str() {
                 Some(s) => s.to_uppercase(),
-                None => { i += 1; continue; }
+                None => {
+                    i += 1;
+                    continue;
+                }
             };
             match upper.as_str() {
-                "JUSTID" => { justid = true; i += 1; }
-                "FORCE" => { force = true; i += 1; }
+                "JUSTID" => {
+                    justid = true;
+                    i += 1;
+                }
+                "FORCE" => {
+                    force = true;
+                    i += 1;
+                }
                 "IDLE" => {
                     i += 1;
                     if i < args.len() {
@@ -1336,7 +1377,9 @@ impl CommandHandler for XClaimCommand {
                 "LASTID" => {
                     i += 2; // skip value
                 }
-                _ => { i += 1; }
+                _ => {
+                    i += 1;
+                }
             }
         }
 
@@ -1539,12 +1582,22 @@ impl CommandHandler for XPendingCommand {
             };
 
             let now_ms = current_ms();
-            let results: Vec<RespValue> = grp.pending
+            let results: Vec<RespValue> = grp
+                .pending
                 .iter()
                 .filter(|p| {
-                    let after_start = if start_excl { p.id > start_id } else { p.id >= start_id };
-                    let before_end = if end_excl { p.id < end_id } else { p.id <= end_id };
-                    let consumer_match = consumer_filter.as_ref().map_or(true, |c| &p.consumer == c);
+                    let after_start = if start_excl {
+                        p.id > start_id
+                    } else {
+                        p.id >= start_id
+                    };
+                    let before_end = if end_excl {
+                        p.id < end_id
+                    } else {
+                        p.id <= end_id
+                    };
+                    let consumer_match =
+                        consumer_filter.as_ref().map_or(true, |c| &p.consumer == c);
                     after_start && before_end && consumer_match
                 })
                 .take(range_count)
@@ -1569,7 +1622,9 @@ impl CommandHandler for XPendingCommand {
 pub struct XInfoCommand;
 
 impl CommandHandler for XInfoCommand {
-    fn name(&self) -> &str { "XINFO" }
+    fn name(&self) -> &str {
+        "XINFO"
+    }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
@@ -1584,7 +1639,9 @@ impl CommandHandler for XInfoCommand {
             "STREAM" => {
                 // XINFO STREAM key [FULL [COUNT count]]
                 if args.len() < 3 {
-                    return RespValue::error("ERR wrong number of arguments for 'xinfo|stream' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xinfo|stream' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -1599,9 +1656,21 @@ impl CommandHandler for XInfoCommand {
                 let length = stream.entries.len() as i64;
                 let last_id = id_to_string(stream.last_id);
                 let groups_count = stream.groups.len() as i64;
-                let first_entry_id = if stream.entries.is_empty() { "0-0".to_string() } else { id_to_string(stream.entries[0].id) };
-                let first_entry = stream.entries.first().map(format_entry).unwrap_or(RespValue::null_bulk());
-                let last_entry = stream.entries.last().map(format_entry).unwrap_or(RespValue::null_bulk());
+                let first_entry_id = if stream.entries.is_empty() {
+                    "0-0".to_string()
+                } else {
+                    id_to_string(stream.entries[0].id)
+                };
+                let first_entry = stream
+                    .entries
+                    .first()
+                    .map(format_entry)
+                    .unwrap_or(RespValue::null_bulk());
+                let last_entry = stream
+                    .entries
+                    .last()
+                    .map(format_entry)
+                    .unwrap_or(RespValue::null_bulk());
                 RespValue::Array(Some(vec![
                     RespValue::bulk_str("length"),
                     RespValue::integer(length),
@@ -1628,7 +1697,9 @@ impl CommandHandler for XInfoCommand {
             "GROUPS" => {
                 // XINFO GROUPS key
                 if args.len() < 3 {
-                    return RespValue::error("ERR wrong number of arguments for 'xinfo|groups' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xinfo|groups' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -1640,33 +1711,46 @@ impl CommandHandler for XInfoCommand {
                     Some(s) => s,
                     None => return RespValue::error("ERR no such key"),
                 };
-                let groups: Vec<RespValue> = stream.groups.iter().map(|(name, grp)| {
-                    let pending = grp.pending.len() as i64;
-                    let consumers = grp.consumers.len() as i64;
-                    let last_id = id_to_string(grp.last_id);
-                    // lag = entries in stream after last-delivered-id
-                    let lag = stream.entries.iter().filter(|e| e.id > grp.last_id).count() as i64;
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_str("name"),
-                        RespValue::bulk_str(name),
-                        RespValue::bulk_str("consumers"),
-                        RespValue::integer(consumers),
-                        RespValue::bulk_str("pending"),
-                        RespValue::integer(pending),
-                        RespValue::bulk_str("last-delivered-id"),
-                        RespValue::bulk_str(&last_id),
-                        RespValue::bulk_str("entries-read"),
-                        RespValue::integer(stream.entries.iter().filter(|e| e.id <= grp.last_id).count() as i64),
-                        RespValue::bulk_str("lag"),
-                        RespValue::integer(lag),
-                    ]))
-                }).collect();
+                let groups: Vec<RespValue> = stream
+                    .groups
+                    .iter()
+                    .map(|(name, grp)| {
+                        let pending = grp.pending.len() as i64;
+                        let consumers = grp.consumers.len() as i64;
+                        let last_id = id_to_string(grp.last_id);
+                        // lag = entries in stream after last-delivered-id
+                        let lag =
+                            stream.entries.iter().filter(|e| e.id > grp.last_id).count() as i64;
+                        RespValue::Array(Some(vec![
+                            RespValue::bulk_str("name"),
+                            RespValue::bulk_str(name),
+                            RespValue::bulk_str("consumers"),
+                            RespValue::integer(consumers),
+                            RespValue::bulk_str("pending"),
+                            RespValue::integer(pending),
+                            RespValue::bulk_str("last-delivered-id"),
+                            RespValue::bulk_str(&last_id),
+                            RespValue::bulk_str("entries-read"),
+                            RespValue::integer(
+                                stream
+                                    .entries
+                                    .iter()
+                                    .filter(|e| e.id <= grp.last_id)
+                                    .count() as i64,
+                            ),
+                            RespValue::bulk_str("lag"),
+                            RespValue::integer(lag),
+                        ]))
+                    })
+                    .collect();
                 RespValue::Array(Some(groups))
             }
             "CONSUMERS" => {
                 // XINFO CONSUMERS key group
                 if args.len() < 4 {
-                    return RespValue::error("ERR wrong number of arguments for 'xinfo|consumers' command");
+                    return RespValue::error(
+                        "ERR wrong number of arguments for 'xinfo|consumers' command",
+                    );
                 }
                 let key = match args[2].as_bytes() {
                     Some(k) => k.to_vec(),
@@ -1687,30 +1771,33 @@ impl CommandHandler for XInfoCommand {
                     Some(g) => g,
                     None => return RespValue::error("ERR no such consumer group"),
                 };
-                let consumers: Vec<RespValue> = grp.consumers.iter().map(|(name, &seen)| {
-                    let pending = grp.pending.iter().filter(|p| &p.consumer == name).count() as i64;
-                    let idle = now_ms.saturating_sub(seen) as i64;
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_str("name"),
-                        RespValue::bulk_str(name),
-                        RespValue::bulk_str("pending"),
-                        RespValue::integer(pending),
-                        RespValue::bulk_str("idle"),
-                        RespValue::integer(idle),
-                        RespValue::bulk_str("inactive"),
-                        RespValue::integer(idle),
-                    ]))
-                }).collect();
+                let consumers: Vec<RespValue> = grp
+                    .consumers
+                    .iter()
+                    .map(|(name, &seen)| {
+                        let pending =
+                            grp.pending.iter().filter(|p| &p.consumer == name).count() as i64;
+                        let idle = now_ms.saturating_sub(seen) as i64;
+                        RespValue::Array(Some(vec![
+                            RespValue::bulk_str("name"),
+                            RespValue::bulk_str(name),
+                            RespValue::bulk_str("pending"),
+                            RespValue::integer(pending),
+                            RespValue::bulk_str("idle"),
+                            RespValue::integer(idle),
+                            RespValue::bulk_str("inactive"),
+                            RespValue::integer(idle),
+                        ]))
+                    })
+                    .collect();
                 RespValue::Array(Some(consumers))
             }
-            "HELP" => {
-                RespValue::Array(Some(vec![
-                    RespValue::bulk_str("XINFO <subcommand> [<arg> ...]. Subcommands are:"),
-                    RespValue::bulk_str("CONSUMERS <key> <groupname> -- Show stream consumers."),
-                    RespValue::bulk_str("GROUPS <key> -- Show stream consumer groups."),
-                    RespValue::bulk_str("STREAM <key> [FULL [COUNT <n>]] -- Show stream info."),
-                ]))
-            }
+            "HELP" => RespValue::Array(Some(vec![
+                RespValue::bulk_str("XINFO <subcommand> [<arg> ...]. Subcommands are:"),
+                RespValue::bulk_str("CONSUMERS <key> <groupname> -- Show stream consumers."),
+                RespValue::bulk_str("GROUPS <key> -- Show stream consumer groups."),
+                RespValue::bulk_str("STREAM <key> [FULL [COUNT <n>]] -- Show stream info."),
+            ])),
             _ => RespValue::error(&format!("ERR unknown subcommand '{}' for 'xinfo'", sub)),
         }
     }
@@ -1721,7 +1808,9 @@ impl CommandHandler for XInfoCommand {
 pub struct XAutoClaimCommand;
 
 impl CommandHandler for XAutoClaimCommand {
-    fn name(&self) -> &str { "XAUTOCLAIM" }
+    fn name(&self) -> &str {
+        "XAUTOCLAIM"
+    }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]
@@ -1755,7 +1844,10 @@ impl CommandHandler for XAutoClaimCommand {
         while i < args.len() {
             let upper = match args[i].as_str() {
                 Some(s) => s.to_uppercase(),
-                None => { i += 1; continue; }
+                None => {
+                    i += 1;
+                    continue;
+                }
             };
             match upper.as_str() {
                 "COUNT" => {
@@ -1767,8 +1859,13 @@ impl CommandHandler for XAutoClaimCommand {
                         i += 1;
                     }
                 }
-                "JUSTID" => { justid = true; i += 1; }
-                _ => { i += 1; }
+                "JUSTID" => {
+                    justid = true;
+                    i += 1;
+                }
+                _ => {
+                    i += 1;
+                }
             }
         }
 
@@ -1783,11 +1880,13 @@ impl CommandHandler for XAutoClaimCommand {
 
         let stream = match store.get_mut(&(db, key)) {
             Some(s) => s,
-            None => return RespValue::Array(Some(vec![
-                RespValue::bulk_str("0-0"),
-                RespValue::Array(Some(vec![])),
-                RespValue::Array(Some(vec![])),
-            ])),
+            None => {
+                return RespValue::Array(Some(vec![
+                    RespValue::bulk_str("0-0"),
+                    RespValue::Array(Some(vec![])),
+                    RespValue::Array(Some(vec![])),
+                ]))
+            }
         };
 
         let grp = match stream.groups.get_mut(&group) {
@@ -1819,10 +1918,13 @@ impl CommandHandler for XAutoClaimCommand {
             }
         }
 
-        let cursor = next_start.map(|id| id_to_string(id)).unwrap_or_else(|| "0-0".to_string());
+        let cursor = next_start
+            .map(|id| id_to_string(id))
+            .unwrap_or_else(|| "0-0".to_string());
 
         if justid {
-            let ids: Vec<RespValue> = claimed_ids.iter()
+            let ids: Vec<RespValue> = claimed_ids
+                .iter()
                 .map(|id| RespValue::bulk_str(&id_to_string(*id)))
                 .collect();
             return RespValue::Array(Some(vec![
@@ -1833,7 +1935,9 @@ impl CommandHandler for XAutoClaimCommand {
         }
 
         // Return full entries for claimed IDs
-        let entries: Vec<RespValue> = stream.entries.iter()
+        let entries: Vec<RespValue> = stream
+            .entries
+            .iter()
             .filter(|e| claimed_ids.contains(&e.id))
             .map(format_entry)
             .collect();
@@ -1851,19 +1955,37 @@ impl CommandHandler for XAutoClaimCommand {
 pub struct XSetIdCommand;
 
 impl CommandHandler for XSetIdCommand {
-    fn name(&self) -> &str { "XSETID" }
+    fn name(&self) -> &str {
+        "XSETID"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments for 'xsetid' command"); }
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments for 'xsetid' command");
+        }
         let db = *db_index;
-        let key = match args[1].as_bytes() { Some(b) => (db, b.to_vec()), None => return RespValue::error("ERR") };
-        let id_str = match args[2].as_str() { Some(s) => s.to_owned(), None => return RespValue::error("ERR") };
+        let key = match args[1].as_bytes() {
+            Some(b) => (db, b.to_vec()),
+            None => return RespValue::error("ERR"),
+        };
+        let id_str = match args[2].as_str() {
+            Some(s) => s.to_owned(),
+            None => return RespValue::error("ERR"),
+        };
         let new_id = match parse_id_bound(&id_str) {
             Some((id, _)) => id,
-            None => return RespValue::error("ERR Invalid stream ID specified as stream command argument"),
+            None => {
+                return RespValue::error(
+                    "ERR Invalid stream ID specified as stream command argument",
+                )
+            }
         };
 
         let mut store = STREAMS.lock();
-        let stream = store.entry(key).or_insert_with(|| Stream { entries: Vec::new(), groups: HashMap::new(), last_id: (0, 0) });
+        let stream = store.entry(key).or_insert_with(|| Stream {
+            entries: Vec::new(),
+            groups: HashMap::new(),
+            last_id: (0, 0),
+        });
         if new_id >= stream.last_id {
             stream.last_id = new_id;
         }

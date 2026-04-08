@@ -252,7 +252,8 @@ impl CommandHandler for LRangeCommand {
         };
         match self.db.lrange(*db_index, key, start, stop) {
             Ok(items) => {
-                let results: Vec<RespValue> = items.into_iter().map(RespValue::bulk_bytes).collect();
+                let results: Vec<RespValue> =
+                    items.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(results))
             }
             Err(e) => map_err(e),
@@ -577,7 +578,8 @@ impl CommandHandler for LPosCommand {
         match self.db.lpos(*db_index, key, element, rank, count, maxlen) {
             Ok(positions) => {
                 if count.is_some() {
-                    let items: Vec<RespValue> = positions.into_iter().map(RespValue::integer).collect();
+                    let items: Vec<RespValue> =
+                        positions.into_iter().map(RespValue::integer).collect();
                     RespValue::Array(Some(items))
                 } else {
                     match positions.first() {
@@ -596,13 +598,18 @@ pub struct BlpopCommand {
 }
 
 impl CommandHandler for BlpopCommand {
-    fn name(&self) -> &str { "BLPOP" }
+    fn name(&self) -> &str {
+        "BLPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'blpop' command");
         }
         // Non-blocking: try to pop from each key in order
-        let keys: Vec<_> = args[1..args.len()-1].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<_> = args[1..args.len() - 1]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
         for key in &keys {
             match self.db.lpop(*db_index, key) {
                 Ok(Some(val)) => {
@@ -624,12 +631,17 @@ pub struct BrpopCommand {
 }
 
 impl CommandHandler for BrpopCommand {
-    fn name(&self) -> &str { "BRPOP" }
+    fn name(&self) -> &str {
+        "BRPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'brpop' command");
         }
-        let keys: Vec<_> = args[1..args.len()-1].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<_> = args[1..args.len() - 1]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
         for key in &keys {
             match self.db.rpop(*db_index, key) {
                 Ok(Some(val)) => {
@@ -651,16 +663,30 @@ pub struct BlmoveCommand {
 }
 
 impl CommandHandler for BlmoveCommand {
-    fn name(&self) -> &str { "BLMOVE" }
+    fn name(&self) -> &str {
+        "BLMOVE"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // BLMOVE src dst wherefrom whereto timeout -> non-blocking LMOVE
         if args.len() < 6 {
             return RespValue::error("ERR wrong number of arguments for 'blmove' command");
         }
-        let src = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-        let dst = match args[2].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-        let wherefrom = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
-        let whereto = args[4].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let src = match args[1].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::null_bulk(),
+        };
+        let dst = match args[2].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::null_bulk(),
+        };
+        let wherefrom = args[3]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
+        let whereto = args[4]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         let left_from = wherefrom == "LEFT";
         let left_to = whereto == "LEFT";
         match self.db.lmove(*db_index, &src, &dst, left_from, left_to) {
@@ -676,14 +702,22 @@ pub struct BrpoplpushCommand {
 }
 
 impl CommandHandler for BrpoplpushCommand {
-    fn name(&self) -> &str { "BRPOPLPUSH" }
+    fn name(&self) -> &str {
+        "BRPOPLPUSH"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // BRPOPLPUSH src dst timeout -> non-blocking RPOPLPUSH
         if args.len() < 4 {
             return RespValue::error("ERR wrong number of arguments for 'brpoplpush' command");
         }
-        let src = match args[1].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
-        let dst = match args[2].as_bytes() { Some(k) => k.to_vec(), None => return RespValue::null_bulk() };
+        let src = match args[1].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::null_bulk(),
+        };
+        let dst = match args[2].as_bytes() {
+            Some(k) => k.to_vec(),
+            None => return RespValue::null_bulk(),
+        };
         match self.db.lmove(*db_index, &src, &dst, false, true) {
             Ok(Some(val)) => RespValue::bulk_bytes(val),
             Ok(None) => RespValue::null_bulk(),
@@ -697,7 +731,9 @@ pub struct LmpopCommand {
 }
 
 impl CommandHandler for LmpopCommand {
-    fn name(&self) -> &str { "LMPOP" }
+    fn name(&self) -> &str {
+        "LMPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
         if args.len() < 4 {
@@ -710,17 +746,30 @@ impl CommandHandler for LmpopCommand {
         if numkeys == 0 || args.len() < 2 + numkeys + 1 {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[2..2+numkeys].iter().filter_map(|a| a.as_bytes()).collect();
-        let direction = args[2+numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
+        let direction = args[2 + numkeys]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         let from_left = direction == "LEFT";
         let count: usize = {
-            let rest = &args[3+numkeys..];
+            let rest = &args[3 + numkeys..];
             let mut c = 1usize;
             let mut i = 0;
             while i < rest.len() {
-                if rest[i].as_str().map(|s| s.to_uppercase() == "COUNT").unwrap_or(false) {
+                if rest[i]
+                    .as_str()
+                    .map(|s| s.to_uppercase() == "COUNT")
+                    .unwrap_or(false)
+                {
                     if i + 1 < rest.len() {
-                        c = rest[i+1].as_str().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        c = rest[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1);
                     }
                 }
                 i += 1;
@@ -730,7 +779,10 @@ impl CommandHandler for LmpopCommand {
         match self.db.lmpop_impl(*db_index, &keys, from_left, count) {
             Ok(None) => RespValue::null_array(),
             Ok(Some((key, items))) => {
-                let elements: Vec<RespValue> = items.into_iter().map(|v| RespValue::bulk_bytes(v)).collect();
+                let elements: Vec<RespValue> = items
+                    .into_iter()
+                    .map(|v| RespValue::bulk_bytes(v))
+                    .collect();
                 RespValue::Array(Some(vec![
                     RespValue::bulk_bytes(key),
                     RespValue::Array(Some(elements)),
@@ -746,7 +798,9 @@ pub struct BlmpopCommand {
 }
 
 impl CommandHandler for BlmpopCommand {
-    fn name(&self) -> &str { "BLMPOP" }
+    fn name(&self) -> &str {
+        "BLMPOP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
         if args.len() < 5 {
@@ -760,17 +814,30 @@ impl CommandHandler for BlmpopCommand {
         if numkeys == 0 || args.len() < 3 + numkeys + 1 {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[3..3+numkeys].iter().filter_map(|a| a.as_bytes()).collect();
-        let direction = args[3+numkeys].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let keys: Vec<&[u8]> = args[3..3 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
+        let direction = args[3 + numkeys]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         let from_left = direction == "LEFT";
         let count: usize = {
-            let rest = &args[4+numkeys..];
+            let rest = &args[4 + numkeys..];
             let mut c = 1usize;
             let mut i = 0;
             while i < rest.len() {
-                if rest[i].as_str().map(|s| s.to_uppercase() == "COUNT").unwrap_or(false) {
+                if rest[i]
+                    .as_str()
+                    .map(|s| s.to_uppercase() == "COUNT")
+                    .unwrap_or(false)
+                {
                     if i + 1 < rest.len() {
-                        c = rest[i+1].as_str().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        c = rest[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1);
                     }
                 }
                 i += 1;
@@ -780,7 +847,10 @@ impl CommandHandler for BlmpopCommand {
         match self.db.lmpop_impl(*db_index, &keys, from_left, count) {
             Ok(None) => RespValue::null_array(),
             Ok(Some((key, items))) => {
-                let elements: Vec<RespValue> = items.into_iter().map(|v| RespValue::bulk_bytes(v)).collect();
+                let elements: Vec<RespValue> = items
+                    .into_iter()
+                    .map(|v| RespValue::bulk_bytes(v))
+                    .collect();
                 RespValue::Array(Some(vec![
                     RespValue::bulk_bytes(key),
                     RespValue::Array(Some(elements)),

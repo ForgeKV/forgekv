@@ -44,7 +44,8 @@ impl BloomFilter {
         let already_present = self.may_contain(key);
         let (h1, h2) = hash_key(key);
         for i in 0..self.hash_count {
-            let bit = ((h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.bit_count as u64) as usize;
+            let bit =
+                ((h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.bit_count as u64) as usize;
             self.bits[bit / 8] |= 1 << (bit % 8);
         }
         if !already_present {
@@ -55,7 +56,8 @@ impl BloomFilter {
     pub fn may_contain(&self, key: &[u8]) -> bool {
         let (h1, h2) = hash_key(key);
         for i in 0..self.hash_count {
-            let bit = ((h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.bit_count as u64) as usize;
+            let bit =
+                ((h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.bit_count as u64) as usize;
             if self.bits[bit / 8] & (1 << (bit % 8)) == 0 {
                 return false;
             }

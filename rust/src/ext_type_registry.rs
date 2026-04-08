@@ -1,10 +1,9 @@
+use parking_lot::Mutex;
 /// Extended type registry for non-LSM data types (Stream, JSON, BF, CF, CMS, TopK, TDigest).
 ///
 /// These types store their actual data in in-memory lazy_static stores but register
 /// their key existence here so that TYPE, EXISTS, KEYS, SCAN, DEL work correctly.
-
 use std::collections::HashMap;
-use parking_lot::Mutex;
 
 lazy_static::lazy_static! {
     /// (db_index, key) -> type_name
@@ -33,7 +32,8 @@ pub fn exists(db: usize, key: &[u8]) -> bool {
 
 /// Returns all keys for a given db.
 pub fn keys_for_db(db: usize) -> Vec<Vec<u8>> {
-    REGISTRY.lock()
+    REGISTRY
+        .lock()
         .keys()
         .filter(|(d, _)| *d == db)
         .map(|(_, k)| k.clone())

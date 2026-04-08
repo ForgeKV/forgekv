@@ -32,15 +32,23 @@ struct Entry {
 
 impl Entry {
     fn new(value: StoredValue) -> Self {
-        Entry { value, expires_at: None }
+        Entry {
+            value,
+            expires_at: None,
+        }
     }
 
     fn with_expiry(value: StoredValue, expires_at: Instant) -> Self {
-        Entry { value, expires_at: Some(expires_at) }
+        Entry {
+            value,
+            expires_at: Some(expires_at),
+        }
     }
 
     fn is_expired(&self) -> bool {
-        self.expires_at.map(|t| Instant::now() >= t).unwrap_or(false)
+        self.expires_at
+            .map(|t| Instant::now() >= t)
+            .unwrap_or(false)
     }
 }
 
@@ -56,14 +64,14 @@ fn validate_key(key: &str) -> RedisResult<()> {
 }
 
 fn wrong_type_err() -> RedisError {
-    RedisError::WrongType(
-        "Operation against a key holding the wrong kind of value".into(),
-    )
+    RedisError::WrongType("Operation against a key holding the wrong kind of value".into())
 }
 
 impl RedisStore {
     pub fn new() -> Self {
-        RedisStore { data: HashMap::new() }
+        RedisStore {
+            data: HashMap::new(),
+        }
     }
 
     fn get_live(&self, key: &str) -> Option<&Entry> {
@@ -130,7 +138,8 @@ impl RedisStore {
             validate_key(k)?;
         }
         for (k, v) in pairs {
-            self.data.insert(k.to_string(), Entry::new(StoredValue::Str(v.to_string())));
+            self.data
+                .insert(k.to_string(), Entry::new(StoredValue::Str(v.to_string())));
         }
         Ok(RedisValue::ok())
     }
@@ -187,7 +196,8 @@ impl RedisStore {
                 _ => return Err(wrong_type_err()),
             },
         };
-        self.data.insert(key.to_owned(), Entry::new(StoredValue::Int(next)));
+        self.data
+            .insert(key.to_owned(), Entry::new(StoredValue::Int(next)));
         Ok(RedisValue::from_integer(next))
     }
 
@@ -203,7 +213,8 @@ impl RedisStore {
             },
         };
         let len = new_str.len() as i64;
-        self.data.insert(key.to_owned(), Entry::new(StoredValue::Str(new_str)));
+        self.data
+            .insert(key.to_owned(), Entry::new(StoredValue::Str(new_str)));
         Ok(RedisValue::from_integer(len))
     }
 
@@ -226,7 +237,10 @@ impl RedisStore {
         if self.data.contains_key(key) {
             return Ok(RedisValue::from_integer(0));
         }
-        self.data.insert(key.to_owned(), Entry::new(StoredValue::Str(value.to_owned())));
+        self.data.insert(
+            key.to_owned(),
+            Entry::new(StoredValue::Str(value.to_owned())),
+        );
         Ok(RedisValue::from_integer(1))
     }
 
@@ -235,7 +249,8 @@ impl RedisStore {
     fn get_or_create_list(&mut self, key: &str) -> RedisResult<&mut Vec<String>> {
         self.remove_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(key.to_owned(), Entry::new(StoredValue::List(Vec::new())));
+            self.data
+                .insert(key.to_owned(), Entry::new(StoredValue::List(Vec::new())));
         }
         match self.data.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -316,17 +331,15 @@ impl RedisStore {
         validate_key(key)?;
         match self.get_existing_list(key)? {
             None => Ok(RedisValue::null()),
-            Some(list) => {
-                match list.pop() {
-                    None => Ok(RedisValue::null()),
-                    Some(val) => {
-                        if list.is_empty() {
-                            self.data.remove(key);
-                        }
-                        Ok(RedisValue::from_string(val))
+            Some(list) => match list.pop() {
+                None => Ok(RedisValue::null()),
+                Some(val) => {
+                    if list.is_empty() {
+                        self.data.remove(key);
                     }
+                    Ok(RedisValue::from_string(val))
                 }
-            }
+            },
         }
     }
 
@@ -352,16 +365,16 @@ impl RedisStore {
                     let s = Self::normalize_list_index(start, len) as usize;
                     let e = {
                         let e = Self::normalize_list_index(stop, len);
-                        if e < 0 { return Ok(RedisValue::from_list(vec![])); }
+                        if e < 0 {
+                            return Ok(RedisValue::from_list(vec![]));
+                        }
                         (e as usize).min(len - 1)
                     };
                     if s > e || s >= len {
                         return Ok(RedisValue::from_list(vec![]));
                     }
-                    let result: Vec<Option<String>> = list[s..=e]
-                        .iter()
-                        .map(|v| Some(v.clone()))
-                        .collect();
+                    let result: Vec<Option<String>> =
+                        list[s..=e].iter().map(|v| Some(v.clone())).collect();
                     Ok(RedisValue::from_list(result))
                 }
                 _ => Err(wrong_type_err()),
@@ -392,7 +405,10 @@ impl RedisStore {
     fn get_or_create_hash(&mut self, key: &str) -> RedisResult<&mut HashMap<String, String>> {
         self.remove_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(key.to_owned(), Entry::new(StoredValue::Hash(HashMap::new())));
+            self.data.insert(
+                key.to_owned(),
+                Entry::new(StoredValue::Hash(HashMap::new())),
+            );
         }
         match self.data.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -420,7 +436,9 @@ impl RedisStore {
     pub fn hset(&mut self, key: &str, field: &str, value: &str) -> RedisResult<RedisValue> {
         validate_key(key)?;
         if field.is_empty() {
-            return Err(RedisError::InvalidArgument("field must not be empty".into()));
+            return Err(RedisError::InvalidArgument(
+                "field must not be empty".into(),
+            ));
         }
         let hash = self.get_or_create_hash(key)?;
         let is_new = !hash.contains_key(field);
@@ -431,7 +449,9 @@ impl RedisStore {
     pub fn hget(&mut self, key: &str, field: &str) -> RedisResult<RedisValue> {
         validate_key(key)?;
         if field.is_empty() {
-            return Err(RedisError::InvalidArgument("field must not be empty".into()));
+            return Err(RedisError::InvalidArgument(
+                "field must not be empty".into(),
+            ));
         }
         match self.get_existing_hash(key)? {
             None => Ok(RedisValue::null()),
@@ -452,7 +472,10 @@ impl RedisStore {
         match self.get_existing_hash(key)? {
             None => Ok(RedisValue::from_integer(0)),
             Some(hash) => {
-                let removed = fields.iter().filter(|&&f| !f.is_empty() && hash.remove(f).is_some()).count() as i64;
+                let removed = fields
+                    .iter()
+                    .filter(|&&f| !f.is_empty() && hash.remove(f).is_some())
+                    .count() as i64;
                 if hash.is_empty() {
                     self.data.remove(key);
                 }
@@ -472,11 +495,17 @@ impl RedisStore {
     pub fn hexists(&mut self, key: &str, field: &str) -> RedisResult<RedisValue> {
         validate_key(key)?;
         if field.is_empty() {
-            return Err(RedisError::InvalidArgument("field must not be empty".into()));
+            return Err(RedisError::InvalidArgument(
+                "field must not be empty".into(),
+            ));
         }
         match self.get_existing_hash(key)? {
             None => Ok(RedisValue::from_integer(0)),
-            Some(hash) => Ok(RedisValue::from_integer(if hash.contains_key(field) { 1 } else { 0 })),
+            Some(hash) => Ok(RedisValue::from_integer(if hash.contains_key(field) {
+                1
+            } else {
+                0
+            })),
         }
     }
 
@@ -497,7 +526,9 @@ impl RedisStore {
         }
         for (f, _) in pairs {
             if f.is_empty() {
-                return Err(RedisError::InvalidArgument("field must not be empty".into()));
+                return Err(RedisError::InvalidArgument(
+                    "field must not be empty".into(),
+                ));
             }
         }
         let hash = self.get_or_create_hash(key)?;
@@ -512,7 +543,8 @@ impl RedisStore {
     fn get_or_create_set(&mut self, key: &str) -> RedisResult<&mut HashSet<String>> {
         self.remove_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(key.to_owned(), Entry::new(StoredValue::Set(HashSet::new())));
+            self.data
+                .insert(key.to_owned(), Entry::new(StoredValue::Set(HashSet::new())));
         }
         match self.data.get_mut(key) {
             Some(entry) => match &mut entry.value {
@@ -546,7 +578,10 @@ impl RedisStore {
             ));
         }
         let set = self.get_or_create_set(key)?;
-        let added = members.iter().filter(|&&m| set.insert(m.to_owned())).count() as i64;
+        let added = members
+            .iter()
+            .filter(|&&m| set.insert(m.to_owned()))
+            .count() as i64;
         Ok(RedisValue::from_integer(added))
     }
 
@@ -577,7 +612,11 @@ impl RedisStore {
         validate_key(key)?;
         match self.get_existing_set_ref(key)? {
             None => Ok(RedisValue::from_integer(0)),
-            Some(set) => Ok(RedisValue::from_integer(if set.contains(member) { 1 } else { 0 })),
+            Some(set) => Ok(RedisValue::from_integer(if set.contains(member) {
+                1
+            } else {
+                0
+            })),
         }
     }
 
@@ -663,7 +702,11 @@ impl RedisStore {
     pub fn exists(&mut self, key: &str) -> RedisResult<RedisValue> {
         validate_key(key)?;
         self.remove_expired(key);
-        Ok(RedisValue::from_integer(if self.data.contains_key(key) { 1 } else { 0 }))
+        Ok(RedisValue::from_integer(if self.data.contains_key(key) {
+            1
+        } else {
+            0
+        }))
     }
 
     pub fn expire(&mut self, key: &str, seconds: i64) -> RedisResult<RedisValue> {
@@ -712,7 +755,8 @@ impl RedisStore {
 
     pub fn keys(&mut self, pattern: &str) -> RedisResult<RedisValue> {
         let regex = glob_to_regex(pattern);
-        let expired: Vec<String> = self.data
+        let expired: Vec<String> = self
+            .data
             .iter()
             .filter(|(_, e)| e.is_expired())
             .map(|(k, _)| k.clone())
@@ -720,7 +764,8 @@ impl RedisStore {
         for k in expired {
             self.data.remove(&k);
         }
-        let matching: Vec<Option<String>> = self.data
+        let matching: Vec<Option<String>> = self
+            .data
             .keys()
             .filter(|k| matches_glob(k, &regex))
             .map(|k| Some(k.clone()))
@@ -742,7 +787,8 @@ impl RedisStore {
     }
 
     pub fn dbsize(&mut self) -> RedisResult<RedisValue> {
-        let expired: Vec<String> = self.data
+        let expired: Vec<String> = self
+            .data
             .iter()
             .filter(|(_, e)| e.is_expired())
             .map(|(k, _)| k.clone())
@@ -901,9 +947,10 @@ mod tests {
         let mut s = store();
         s.lpush("list", &["c", "b", "a"]).unwrap();
         let r = s.lrange("list", 0, -1).unwrap();
-        assert_eq!(r, RedisValue::from_list(vec![
-            Some("a".into()), Some("b".into()), Some("c".into()),
-        ]));
+        assert_eq!(
+            r,
+            RedisValue::from_list(vec![Some("a".into()), Some("b".into()), Some("c".into()),])
+        );
     }
 
     #[test]
@@ -939,7 +986,10 @@ mod tests {
     fn hset_and_hget() {
         let mut s = store();
         s.hset("h", "field", "value").unwrap();
-        assert_eq!(s.hget("h", "field").unwrap(), RedisValue::from_string("value"));
+        assert_eq!(
+            s.hget("h", "field").unwrap(),
+            RedisValue::from_string("value")
+        );
     }
 
     #[test]
@@ -1059,7 +1109,10 @@ mod tests {
         assert_eq!(s.type_of("lst").unwrap(), RedisValue::from_string("list"));
         assert_eq!(s.type_of("hash").unwrap(), RedisValue::from_string("hash"));
         assert_eq!(s.type_of("set").unwrap(), RedisValue::from_string("set"));
-        assert_eq!(s.type_of("missing").unwrap(), RedisValue::from_string("none"));
+        assert_eq!(
+            s.type_of("missing").unwrap(),
+            RedisValue::from_string("none")
+        );
     }
 }
 
@@ -1070,7 +1123,9 @@ fn glob_match_inner(text: &[u8], pattern: &[u8]) -> bool {
     let mut star_ti = 0;
 
     while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == b'.' && (pi + 1 < pattern.len() && pattern[pi + 1] == b'*')) {
+        if pi < pattern.len()
+            && (pattern[pi] == b'.' && (pi + 1 < pattern.len() && pattern[pi + 1] == b'*'))
+        {
             star_pi = Some(pi);
             star_ti = ti;
             pi += 2;

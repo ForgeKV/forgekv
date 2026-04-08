@@ -1,14 +1,16 @@
+use super::CommandHandler;
 /// RediSearch / FT.* command stubs
 /// Full-text search is acknowledged but returns empty results.
 /// This ensures client compatibility without crashing.
 use crate::resp::RespValue;
-use super::CommandHandler;
 
 // ── FT.CREATE ─────────────────────────────────────────────────────────────────
 
 pub struct FtCreateCommand;
 impl CommandHandler for FtCreateCommand {
-    fn name(&self) -> &str { "FT.CREATE" }
+    fn name(&self) -> &str {
+        "FT.CREATE"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -18,7 +20,9 @@ impl CommandHandler for FtCreateCommand {
 
 pub struct FtDropIndexCommand;
 impl CommandHandler for FtDropIndexCommand {
-    fn name(&self) -> &str { "FT.DROPINDEX" }
+    fn name(&self) -> &str {
+        "FT.DROPINDEX"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -26,7 +30,9 @@ impl CommandHandler for FtDropIndexCommand {
 
 pub struct FtDropCommand;
 impl CommandHandler for FtDropCommand {
-    fn name(&self) -> &str { "FT.DROP" }
+    fn name(&self) -> &str {
+        "FT.DROP"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -36,12 +42,12 @@ impl CommandHandler for FtDropCommand {
 
 pub struct FtSearchCommand;
 impl CommandHandler for FtSearchCommand {
-    fn name(&self) -> &str { "FT.SEARCH" }
+    fn name(&self) -> &str {
+        "FT.SEARCH"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         // Return empty result: [0, (no results)]
-        RespValue::Array(Some(vec![
-            RespValue::integer(0),
-        ]))
+        RespValue::Array(Some(vec![RespValue::integer(0)]))
     }
 }
 
@@ -49,7 +55,9 @@ impl CommandHandler for FtSearchCommand {
 
 pub struct FtAggregateCommand;
 impl CommandHandler for FtAggregateCommand {
-    fn name(&self) -> &str { "FT.AGGREGATE" }
+    fn name(&self) -> &str {
+        "FT.AGGREGATE"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![RespValue::integer(0)]))
     }
@@ -59,9 +67,15 @@ impl CommandHandler for FtAggregateCommand {
 
 pub struct FtInfoCommand;
 impl CommandHandler for FtInfoCommand {
-    fn name(&self) -> &str { "FT.INFO" }
+    fn name(&self) -> &str {
+        "FT.INFO"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        let name = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+        let name = args
+            .get(1)
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .to_string();
         RespValue::Array(Some(vec![
             RespValue::bulk_str("index_name"),
             RespValue::bulk_str(&name),
@@ -117,7 +131,9 @@ impl CommandHandler for FtInfoCommand {
 
 pub struct FtListCommand;
 impl CommandHandler for FtListCommand {
-    fn name(&self) -> &str { "FT.LIST" }
+    fn name(&self) -> &str {
+        "FT.LIST"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -125,9 +141,13 @@ impl CommandHandler for FtListCommand {
 
 // ── FT.EXPLAIN / FT.EXPLAINCL ─────────────────────────────────────────────────
 
-pub struct FtExplainCommand { pub name: &'static str }
+pub struct FtExplainCommand {
+    pub name: &'static str,
+}
 impl CommandHandler for FtExplainCommand {
-    fn name(&self) -> &str { self.name }
+    fn name(&self) -> &str {
+        self.name
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::bulk_str("")
     }
@@ -137,7 +157,9 @@ impl CommandHandler for FtExplainCommand {
 
 pub struct FtAlterCommand;
 impl CommandHandler for FtAlterCommand {
-    fn name(&self) -> &str { "FT.ALTER" }
+    fn name(&self) -> &str {
+        "FT.ALTER"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -147,29 +169,46 @@ impl CommandHandler for FtAlterCommand {
 
 pub struct FtAliasAddCommand;
 impl CommandHandler for FtAliasAddCommand {
-    fn name(&self) -> &str { "FT.ALIASADD" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "FT.ALIASADD"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct FtAliasDel;
 impl CommandHandler for FtAliasDel {
-    fn name(&self) -> &str { "FT.ALIASDEL" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "FT.ALIASDEL"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct FtAliasUpdate;
 impl CommandHandler for FtAliasUpdate {
-    fn name(&self) -> &str { "FT.ALIASUPDATE" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "FT.ALIASUPDATE"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 // ── FT.CURSOR ─────────────────────────────────────────────────────────────────
 
 pub struct FtCursorCommand;
 impl CommandHandler for FtCursorCommand {
-    fn name(&self) -> &str { "FT.CURSOR" }
+    fn name(&self) -> &str {
+        "FT.CURSOR"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
-        RespValue::Array(Some(vec![RespValue::Array(Some(vec![])), RespValue::integer(0)]))
+        RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![])),
+            RespValue::integer(0),
+        ]))
     }
 }
 
@@ -177,19 +216,29 @@ impl CommandHandler for FtCursorCommand {
 
 pub struct FtDictAddCommand;
 impl CommandHandler for FtDictAddCommand {
-    fn name(&self) -> &str { "FT.DICTADD" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::integer(0) }
+    fn name(&self) -> &str {
+        "FT.DICTADD"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::integer(0)
+    }
 }
 
 pub struct FtDictDelCommand;
 impl CommandHandler for FtDictDelCommand {
-    fn name(&self) -> &str { "FT.DICTDEL" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::integer(0) }
+    fn name(&self) -> &str {
+        "FT.DICTDEL"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::integer(0)
+    }
 }
 
 pub struct FtDictDumpCommand;
 impl CommandHandler for FtDictDumpCommand {
-    fn name(&self) -> &str { "FT.DICTDUMP" }
+    fn name(&self) -> &str {
+        "FT.DICTDUMP"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -199,7 +248,9 @@ impl CommandHandler for FtDictDumpCommand {
 
 pub struct FtSpellCheckCommand;
 impl CommandHandler for FtSpellCheckCommand {
-    fn name(&self) -> &str { "FT.SPELLCHECK" }
+    fn name(&self) -> &str {
+        "FT.SPELLCHECK"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -209,19 +260,29 @@ impl CommandHandler for FtSpellCheckCommand {
 
 pub struct FtSugAddCommand;
 impl CommandHandler for FtSugAddCommand {
-    fn name(&self) -> &str { "FT.SUGADD" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::integer(1) }
+    fn name(&self) -> &str {
+        "FT.SUGADD"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::integer(1)
+    }
 }
 
 pub struct FtSugDelCommand;
 impl CommandHandler for FtSugDelCommand {
-    fn name(&self) -> &str { "FT.SUGDEL" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::integer(0) }
+    fn name(&self) -> &str {
+        "FT.SUGDEL"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::integer(0)
+    }
 }
 
 pub struct FtSugGetCommand;
 impl CommandHandler for FtSugGetCommand {
-    fn name(&self) -> &str { "FT.SUGGET" }
+    fn name(&self) -> &str {
+        "FT.SUGGET"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -229,21 +290,31 @@ impl CommandHandler for FtSugGetCommand {
 
 pub struct FtSugLenCommand;
 impl CommandHandler for FtSugLenCommand {
-    fn name(&self) -> &str { "FT.SUGLEN" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::integer(0) }
+    fn name(&self) -> &str {
+        "FT.SUGLEN"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::integer(0)
+    }
 }
 
 // ── FT.SYNUPDATE / FT.SYNDUMP ─────────────────────────────────────────────────
 
 pub struct FtSynUpdateCommand;
 impl CommandHandler for FtSynUpdateCommand {
-    fn name(&self) -> &str { "FT.SYNUPDATE" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "FT.SYNUPDATE"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct FtSynDumpCommand;
 impl CommandHandler for FtSynDumpCommand {
-    fn name(&self) -> &str { "FT.SYNDUMP" }
+    fn name(&self) -> &str {
+        "FT.SYNDUMP"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -253,7 +324,9 @@ impl CommandHandler for FtSynDumpCommand {
 
 pub struct FtTagValsCommand;
 impl CommandHandler for FtTagValsCommand {
-    fn name(&self) -> &str { "FT.TAGVALS" }
+    fn name(&self) -> &str {
+        "FT.TAGVALS"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -263,7 +336,9 @@ impl CommandHandler for FtTagValsCommand {
 
 pub struct FtProfileCommand;
 impl CommandHandler for FtProfileCommand {
-    fn name(&self) -> &str { "FT.PROFILE" }
+    fn name(&self) -> &str {
+        "FT.PROFILE"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![
             RespValue::Array(Some(vec![RespValue::integer(0)])),
@@ -276,9 +351,15 @@ impl CommandHandler for FtProfileCommand {
 
 pub struct FtConfigCommand;
 impl CommandHandler for FtConfigCommand {
-    fn name(&self) -> &str { "FT.CONFIG" }
+    fn name(&self) -> &str {
+        "FT.CONFIG"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        let sub = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_uppercase()).unwrap_or_default();
+        let sub = args
+            .get(1)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         match sub.as_str() {
             "SET" => RespValue::ok(),
             "GET" => RespValue::Array(Some(vec![])),

@@ -219,7 +219,7 @@ impl Default for ServerConfig {
             lazyfree_lazy_user_flush: false,
             activerehashing: true,
             activedefrag: false,
-            proto_max_bulk_len: 536870912, // 512mb
+            proto_max_bulk_len: 536870912,         // 512mb
             client_query_buffer_limit: 1073741824, // 1gb
             hash_max_listpack_entries: 128,
             hash_max_listpack_value: 64,
@@ -282,7 +282,13 @@ impl ConfigParser {
             let value = parts[1].trim();
 
             match key.as_str() {
-                "bind" => config.bind = value.split_whitespace().next().unwrap_or("127.0.0.1").to_string(),
+                "bind" => {
+                    config.bind = value
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string()
+                }
                 "port" => config.port = value.parse().unwrap_or(6379),
                 "tcp-backlog" => config.tcp_backlog = value.parse().unwrap_or(511),
                 "tcp-keepalive" => config.tcp_keepalive = value.parse().unwrap_or(300),
@@ -331,16 +337,24 @@ impl ConfigParser {
                 "activerehashing" => config.activerehashing = value == "yes",
                 "activedefrag" => config.activedefrag = value == "yes",
                 "proto-max-bulk-len" => config.proto_max_bulk_len = parse_memory_size(value),
-                "client-query-buffer-limit" => config.client_query_buffer_limit = parse_memory_size(value),
+                "client-query-buffer-limit" => {
+                    config.client_query_buffer_limit = parse_memory_size(value)
+                }
                 "hash-max-listpack-entries" | "hash-max-ziplist-entries" => {
                     config.hash_max_listpack_entries = value.parse().unwrap_or(128);
                 }
                 "hash-max-listpack-value" | "hash-max-ziplist-value" => {
                     config.hash_max_listpack_value = value.parse().unwrap_or(64);
                 }
-                "set-max-intset-entries" => config.set_max_intset_entries = value.parse().unwrap_or(512),
-                "set-max-listpack-entries" => config.set_max_listpack_entries = value.parse().unwrap_or(128),
-                "set-max-listpack-value" => config.set_max_listpack_value = value.parse().unwrap_or(64),
+                "set-max-intset-entries" => {
+                    config.set_max_intset_entries = value.parse().unwrap_or(512)
+                }
+                "set-max-listpack-entries" => {
+                    config.set_max_listpack_entries = value.parse().unwrap_or(128)
+                }
+                "set-max-listpack-value" => {
+                    config.set_max_listpack_value = value.parse().unwrap_or(64)
+                }
                 "zset-max-listpack-entries" | "zset-max-ziplist-entries" => {
                     config.zset_max_listpack_entries = value.parse().unwrap_or(128);
                 }
@@ -351,36 +365,56 @@ impl ConfigParser {
                     config.list_max_listpack_size = value.parse().unwrap_or(-2);
                 }
                 "list-compress-depth" => config.list_compress_depth = value.parse().unwrap_or(0),
-                "stream-node-max-bytes" => config.stream_node_max_bytes = value.parse().unwrap_or(4096),
-                "stream-node-max-entries" => config.stream_node_max_entries = value.parse().unwrap_or(100),
+                "stream-node-max-bytes" => {
+                    config.stream_node_max_bytes = value.parse().unwrap_or(4096)
+                }
+                "stream-node-max-entries" => {
+                    config.stream_node_max_entries = value.parse().unwrap_or(100)
+                }
                 "lua-time-limit" => config.lua_time_limit = value.parse().unwrap_or(5000),
-                "busy-reply-threshold" => config.busy_reply_threshold = value.parse().unwrap_or(5000),
-                "slowlog-log-slower-than" => config.slowlog_log_slower_than = value.parse().unwrap_or(10000),
+                "busy-reply-threshold" => {
+                    config.busy_reply_threshold = value.parse().unwrap_or(5000)
+                }
+                "slowlog-log-slower-than" => {
+                    config.slowlog_log_slower_than = value.parse().unwrap_or(10000)
+                }
                 "slowlog-max-len" => config.slowlog_max_len = value.parse().unwrap_or(128),
                 "latency-tracking" => config.latency_tracking = value == "yes",
-                "latency-monitor-threshold" => config.latency_monitor_threshold = value.parse().unwrap_or(0),
+                "latency-monitor-threshold" => {
+                    config.latency_monitor_threshold = value.parse().unwrap_or(0)
+                }
                 "notify-keyspace-events" => config.notify_keyspace_events = value.to_string(),
                 "cluster-enabled" => config.cluster_enabled = value == "yes",
                 "cluster-config-file" => config.cluster_config_file = value.to_string(),
-                "cluster-node-timeout" => config.cluster_node_timeout = value.parse().unwrap_or(15000),
-                "cluster-require-full-coverage" => config.cluster_require_full_coverage = value == "yes",
+                "cluster-node-timeout" => {
+                    config.cluster_node_timeout = value.parse().unwrap_or(15000)
+                }
+                "cluster-require-full-coverage" => {
+                    config.cluster_require_full_coverage = value == "yes"
+                }
                 "io-threads" => config.io_threads = value.parse().unwrap_or(1),
                 "io-threads-do-reads" => config.io_threads_do_reads = value == "yes",
                 "rdbcompression" | "rdb-compression" => config.rdb_compression = value == "yes",
                 "rdbchecksum" | "rdb-checksum" => config.rdb_checksum = value == "yes",
                 "rdb-save-incremental-fsync" => config.rdb_save_incremental_fsync = value == "yes",
                 "aof-use-rdb-preamble" => config.aof_use_rdb_preamble = value == "yes",
-                "tracking-table-max-keys" => config.tracking_table_max_keys = value.parse().unwrap_or(0),
+                "tracking-table-max-keys" => {
+                    config.tracking_table_max_keys = value.parse().unwrap_or(0)
+                }
                 "jemalloc-bg-thread" => config.jemalloc_bg_thread = value == "yes",
                 "repl-backlog-size" => config.repl_backlog_size = parse_memory_size(value),
                 "repl-diskless-sync" => config.repl_diskless_sync = value == "yes",
-                "repl-diskless-sync-delay" => config.repl_diskless_sync_delay = value.parse().unwrap_or(5),
+                "repl-diskless-sync-delay" => {
+                    config.repl_diskless_sync_delay = value.parse().unwrap_or(5)
+                }
                 "repl-timeout" => config.repl_timeout = value.parse().unwrap_or(60),
                 "replica-lazy-flush" => config.replica_lazy_flush = value == "yes",
                 "replica-serve-stale-data" | "slave-serve-stale-data" => {
                     config.replica_serve_stale_data = value == "yes";
                 }
-                "replica-read-only" | "slave-read-only" => config.replica_read_only = value == "yes",
+                "replica-read-only" | "slave-read-only" => {
+                    config.replica_read_only = value == "yes"
+                }
                 "active-expire-enabled" => config.active_expire_enabled = value == "yes",
                 "close-on-oom" => config.close_on_oom = value == "yes",
                 "crash-log-enabled" => config.crash_log_enabled = value == "yes",

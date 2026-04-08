@@ -7,13 +7,12 @@
 ///
 /// Implementation: A simplified T-Digest using a sorted vector of (value, count)
 /// centroids. Suitable for approximate quantile estimation.
-
 use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
-use crate::resp::RespValue;
 use super::CommandHandler;
+use crate::resp::RespValue;
 
 // ── T-Digest data structure ────────────────────────────────────────────────────
 
@@ -49,9 +48,15 @@ impl TDigest {
     }
 
     fn compress(&mut self) {
-        self.centroids.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal));
+        self.centroids.sort_by(|a, b| {
+            a.mean
+                .partial_cmp(&b.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let max_centroids = self.compression as usize;
-        if self.centroids.len() <= max_centroids { return; }
+        if self.centroids.len() <= max_centroids {
+            return;
+        }
 
         let old = std::mem::take(&mut self.centroids);
         let mut merged: Vec<Centroid> = Vec::new();
@@ -82,9 +87,15 @@ impl TDigest {
     }
 
     pub fn quantile(&self, q: f64) -> Option<f64> {
-        if self.centroids.is_empty() || self.total_count == 0.0 { return None; }
+        if self.centroids.is_empty() || self.total_count == 0.0 {
+            return None;
+        }
         let mut sorted = self.centroids.clone();
-        sorted.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.mean
+                .partial_cmp(&b.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let target = q * self.total_count;
         let mut cumulative = 0.0;
@@ -98,34 +109,57 @@ impl TDigest {
     }
 
     pub fn cdf(&self, value: f64) -> f64 {
-        if self.centroids.is_empty() || self.total_count == 0.0 { return 0.0; }
+        if self.centroids.is_empty() || self.total_count == 0.0 {
+            return 0.0;
+        }
         let mut sorted = self.centroids.clone();
-        sorted.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.mean
+                .partial_cmp(&b.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut cumulative = 0.0;
         for c in &sorted {
-            if c.mean > value { break; }
+            if c.mean > value {
+                break;
+            }
             cumulative += c.count;
         }
         cumulative / self.total_count
     }
 
     pub fn rank(&self, value: f64) -> i64 {
-        if self.centroids.is_empty() { return -1; }
+        if self.centroids.is_empty() {
+            return -1;
+        }
         let mut sorted = self.centroids.clone();
-        sorted.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.mean
+                .partial_cmp(&b.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut rank: i64 = 0;
         for c in &sorted {
-            if c.mean < value { rank += c.count as i64; }
-            else { break; }
+            if c.mean < value {
+                rank += c.count as i64;
+            } else {
+                break;
+            }
         }
         rank
     }
 
     pub fn trimmed_mean(&self, low_cut: f64, high_cut: f64) -> Option<f64> {
-        if self.centroids.is_empty() { return None; }
+        if self.centroids.is_empty() {
+            return None;
+        }
         let mut sorted = self.centroids.clone();
-        sorted.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.mean
+                .partial_cmp(&b.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let low = low_cut * self.total_count;
         let high = (1.0 - high_cut) * self.total_count;
         let mut cumulative = 0.0;
@@ -139,7 +173,11 @@ impl TDigest {
                 count += c.count;
             }
         }
-        if count == 0.0 { None } else { Some(sum / count) }
+        if count == 0.0 {
+            None
+        } else {
+            Some(sum / count)
+        }
     }
 
     pub fn merge_from(&mut self, other: &TDigest) {
@@ -169,15 +207,27 @@ lazy_static::lazy_static! {
 
 pub struct TDigestCreateCommand;
 impl CommandHandler for TDigestCreateCommand {
-    fn name(&self) -> &str { "TDIGEST.CREATE" }
+    fn name(&self) -> &str {
+        "TDIGEST.CREATE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'TDIGEST.CREATE'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
-        let compression: f64 = if args.len() >= 4 && args[2].as_str().map(|s| s.to_uppercase()) == Some("COMPRESSION".to_string()) {
-            args[3].as_str().and_then(|s| s.parse().ok()).unwrap_or(100.0)
-        } else { 100.0 };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
+        let compression: f64 = if args.len() >= 4
+            && args[2].as_str().map(|s| s.to_uppercase()) == Some("COMPRESSION".to_string())
+        {
+            args[3]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100.0)
+        } else {
+            100.0
+        };
         let mut store = TD_STORE.lock();
         if store.contains_key(&key) {
             return RespValue::error("ERR T-Digest: key already exists");
@@ -191,17 +241,29 @@ impl CommandHandler for TDigestCreateCommand {
 
 pub struct TDigestAddCommand;
 impl CommandHandler for TDigestAddCommand {
-    fn name(&self) -> &str { "TDIGEST.ADD" }
+    fn name(&self) -> &str {
+        "TDIGEST.ADD"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'TDIGEST.ADD'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
-        let values: Vec<f64> = args[2..].iter().filter_map(|a| a.as_str().and_then(|s| s.parse().ok())).collect();
-        if values.is_empty() { return RespValue::error("ERR no valid values"); }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
+        let values: Vec<f64> = args[2..]
+            .iter()
+            .filter_map(|a| a.as_str().and_then(|s| s.parse().ok()))
+            .collect();
+        if values.is_empty() {
+            return RespValue::error("ERR no valid values");
+        }
         let mut store = TD_STORE.lock();
         let td = store.entry(key).or_insert_with(|| TDigest::new(100.0));
-        for v in values { td.add(v, 1.0); }
+        for v in values {
+            td.add(v, 1.0);
+        }
         RespValue::ok()
     }
 }
@@ -210,10 +272,17 @@ impl CommandHandler for TDigestAddCommand {
 
 pub struct TDigestResetCommand;
 impl CommandHandler for TDigestResetCommand {
-    fn name(&self) -> &str { "TDIGEST.RESET" }
+    fn name(&self) -> &str {
+        "TDIGEST.RESET"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 2 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 2 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let mut store = TD_STORE.lock();
         if let Some(td) = store.get_mut(&key) {
             td.reset();
@@ -228,20 +297,38 @@ impl CommandHandler for TDigestResetCommand {
 
 pub struct TDigestMergeCommand;
 impl CommandHandler for TDigestMergeCommand {
-    fn name(&self) -> &str { "TDIGEST.MERGE" }
+    fn name(&self) -> &str {
+        "TDIGEST.MERGE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // TDIGEST.MERGE destKey numkeys sourceKey [sourceKey ...] [COMPRESSION compression] [OVERRIDE]
-        if args.len() < 4 { return RespValue::error("ERR wrong number of arguments"); }
-        let dest = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 4 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let dest = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let numkeys: usize = args[2].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
-        if args.len() < 3 + numkeys { return RespValue::error("ERR not enough source keys"); }
-        let sources: Vec<Vec<u8>> = args[3..3+numkeys].iter()
+        if args.len() < 3 + numkeys {
+            return RespValue::error("ERR not enough source keys");
+        }
+        let sources: Vec<Vec<u8>> = args[3..3 + numkeys]
+            .iter()
             .filter_map(|a| a.as_bytes().map(|b| b.to_vec()))
             .collect();
         let mut store = TD_STORE.lock();
-        let merged: Vec<TDigest> = sources.iter().filter_map(|k| store.get(k).cloned()).collect();
-        let mut dest_td = store.get(&dest).cloned().unwrap_or_else(|| TDigest::new(100.0));
-        for src in &merged { dest_td.merge_from(src); }
+        let merged: Vec<TDigest> = sources
+            .iter()
+            .filter_map(|k| store.get(k).cloned())
+            .collect();
+        let mut dest_td = store
+            .get(&dest)
+            .cloned()
+            .unwrap_or_else(|| TDigest::new(100.0));
+        for src in &merged {
+            dest_td.merge_from(src);
+        }
         store.insert(dest, dest_td);
         RespValue::ok()
     }
@@ -251,24 +338,37 @@ impl CommandHandler for TDigestMergeCommand {
 
 pub struct TDigestQuantileCommand;
 impl CommandHandler for TDigestQuantileCommand {
-    fn name(&self) -> &str { "TDIGEST.QUANTILE" }
+    fn name(&self) -> &str {
+        "TDIGEST.QUANTILE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let q: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            match td.quantile(q) {
-                Some(v) => RespValue::bulk_str(&format!("{}", v)),
-                None => RespValue::null_bulk(),
-            }
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let q: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                match td.quantile(q) {
+                    Some(v) => RespValue::bulk_str(&format!("{}", v)),
+                    None => RespValue::null_bulk(),
+                }
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -276,21 +376,34 @@ impl CommandHandler for TDigestQuantileCommand {
 
 pub struct TDigestCdfCommand;
 impl CommandHandler for TDigestCdfCommand {
-    fn name(&self) -> &str { "TDIGEST.CDF" }
+    fn name(&self) -> &str {
+        "TDIGEST.CDF"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            RespValue::bulk_str(&format!("{}", td.cdf(v)))
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                RespValue::bulk_str(&format!("{}", td.cdf(v)))
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -298,21 +411,34 @@ impl CommandHandler for TDigestCdfCommand {
 
 pub struct TDigestRankCommand;
 impl CommandHandler for TDigestRankCommand {
-    fn name(&self) -> &str { "TDIGEST.RANK" }
+    fn name(&self) -> &str {
+        "TDIGEST.RANK"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            RespValue::integer(td.rank(v))
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                RespValue::integer(td.rank(v))
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -320,23 +446,36 @@ impl CommandHandler for TDigestRankCommand {
 
 pub struct TDigestRevRankCommand;
 impl CommandHandler for TDigestRevRankCommand {
-    fn name(&self) -> &str { "TDIGEST.REVRANK" }
+    fn name(&self) -> &str {
+        "TDIGEST.REVRANK"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let rank = td.rank(v);
-            let revrank = td.total_count as i64 - rank - 1;
-            RespValue::integer(revrank.max(-1))
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let v: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let rank = td.rank(v);
+                let revrank = td.total_count as i64 - rank - 1;
+                RespValue::integer(revrank.max(-1))
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -344,25 +483,42 @@ impl CommandHandler for TDigestRevRankCommand {
 
 pub struct TDigestByRankCommand;
 impl CommandHandler for TDigestByRankCommand {
-    fn name(&self) -> &str { "TDIGEST.BYRANK" }
+    fn name(&self) -> &str {
+        "TDIGEST.BYRANK"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let rank: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let q = if td.total_count > 0.0 { rank / td.total_count } else { 0.0 };
-            match td.quantile(q) {
-                Some(v) => RespValue::bulk_str(&format!("{}", v)),
-                None => RespValue::bulk_str("nan"),
-            }
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let rank: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let q = if td.total_count > 0.0 {
+                    rank / td.total_count
+                } else {
+                    0.0
+                };
+                match td.quantile(q) {
+                    Some(v) => RespValue::bulk_str(&format!("{}", v)),
+                    None => RespValue::bulk_str("nan"),
+                }
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -370,26 +526,43 @@ impl CommandHandler for TDigestByRankCommand {
 
 pub struct TDigestByRevRankCommand;
 impl CommandHandler for TDigestByRevRankCommand {
-    fn name(&self) -> &str { "TDIGEST.BYREVRANK" }
+    fn name(&self) -> &str {
+        "TDIGEST.BYREVRANK"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 3 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 3 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         let td = match store.get(&key) {
             Some(t) => t,
             None => return RespValue::error("ERR T-Digest: key does not exist"),
         };
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            let revrank: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let rank = td.total_count - revrank - 1.0;
-            let q = if td.total_count > 0.0 { rank / td.total_count } else { 0.0 };
-            match td.quantile(q.max(0.0)) {
-                Some(v) => RespValue::bulk_str(&format!("{}", v)),
-                None => RespValue::bulk_str("nan"),
-            }
-        }).collect();
-        if results.len() == 1 { results.into_iter().next().unwrap() }
-        else { RespValue::Array(Some(results)) }
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                let revrank: f64 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let rank = td.total_count - revrank - 1.0;
+                let q = if td.total_count > 0.0 {
+                    rank / td.total_count
+                } else {
+                    0.0
+                };
+                match td.quantile(q.max(0.0)) {
+                    Some(v) => RespValue::bulk_str(&format!("{}", v)),
+                    None => RespValue::bulk_str("nan"),
+                }
+            })
+            .collect();
+        if results.len() == 1 {
+            results.into_iter().next().unwrap()
+        } else {
+            RespValue::Array(Some(results))
+        }
     }
 }
 
@@ -397,10 +570,17 @@ impl CommandHandler for TDigestByRevRankCommand {
 
 pub struct TDigestMinCommand;
 impl CommandHandler for TDigestMinCommand {
-    fn name(&self) -> &str { "TDIGEST.MIN" }
+    fn name(&self) -> &str {
+        "TDIGEST.MIN"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 2 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 2 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         match store.get(&key) {
             Some(td) => match td.min() {
@@ -416,10 +596,17 @@ impl CommandHandler for TDigestMinCommand {
 
 pub struct TDigestMaxCommand;
 impl CommandHandler for TDigestMaxCommand {
-    fn name(&self) -> &str { "TDIGEST.MAX" }
+    fn name(&self) -> &str {
+        "TDIGEST.MAX"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 2 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 2 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         match store.get(&key) {
             Some(td) => match td.max() {
@@ -435,10 +622,17 @@ impl CommandHandler for TDigestMaxCommand {
 
 pub struct TDigestTrimmedMeanCommand;
 impl CommandHandler for TDigestTrimmedMeanCommand {
-    fn name(&self) -> &str { "TDIGEST.TRIMMED_MEAN" }
+    fn name(&self) -> &str {
+        "TDIGEST.TRIMMED_MEAN"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 4 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 4 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let low: f64 = args[2].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let high: f64 = args[3].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let store = TD_STORE.lock();
@@ -456,34 +650,39 @@ impl CommandHandler for TDigestTrimmedMeanCommand {
 
 pub struct TDigestInfoCommand;
 impl CommandHandler for TDigestInfoCommand {
-    fn name(&self) -> &str { "TDIGEST.INFO" }
+    fn name(&self) -> &str {
+        "TDIGEST.INFO"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 2 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 2 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let store = TD_STORE.lock();
         match store.get(&key) {
-            Some(td) => {
-                RespValue::Array(Some(vec![
-                    RespValue::bulk_str("Compression"),
-                    RespValue::bulk_str(&format!("{}", td.compression as i64)),
-                    RespValue::bulk_str("Capacity"),
-                    RespValue::integer((td.compression as i64) * 6),
-                    RespValue::bulk_str("Merged nodes"),
-                    RespValue::integer(td.size() as i64),
-                    RespValue::bulk_str("Unmerged nodes"),
-                    RespValue::integer(0),
-                    RespValue::bulk_str("Merged weight"),
-                    RespValue::bulk_str(&format!("{}", td.total_count as i64)),
-                    RespValue::bulk_str("Unmerged weight"),
-                    RespValue::integer(0),
-                    RespValue::bulk_str("Observations"),
-                    RespValue::bulk_str(&format!("{}", td.total_count as i64)),
-                    RespValue::bulk_str("Total compressions"),
-                    RespValue::integer(1),
-                    RespValue::bulk_str("Memory usage"),
-                    RespValue::integer((td.size() * 16 + 64) as i64),
-                ]))
-            }
+            Some(td) => RespValue::Array(Some(vec![
+                RespValue::bulk_str("Compression"),
+                RespValue::bulk_str(&format!("{}", td.compression as i64)),
+                RespValue::bulk_str("Capacity"),
+                RespValue::integer((td.compression as i64) * 6),
+                RespValue::bulk_str("Merged nodes"),
+                RespValue::integer(td.size() as i64),
+                RespValue::bulk_str("Unmerged nodes"),
+                RespValue::integer(0),
+                RespValue::bulk_str("Merged weight"),
+                RespValue::bulk_str(&format!("{}", td.total_count as i64)),
+                RespValue::bulk_str("Unmerged weight"),
+                RespValue::integer(0),
+                RespValue::bulk_str("Observations"),
+                RespValue::bulk_str(&format!("{}", td.total_count as i64)),
+                RespValue::bulk_str("Total compressions"),
+                RespValue::integer(1),
+                RespValue::bulk_str("Memory usage"),
+                RespValue::integer((td.size() * 16 + 64) as i64),
+            ])),
             None => RespValue::error("ERR T-Digest: key does not exist"),
         }
     }

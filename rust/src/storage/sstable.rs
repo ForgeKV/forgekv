@@ -137,7 +137,10 @@ impl SSTableReader {
 
         let len = mmap.len();
         if len < FOOTER_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "SSTable too small"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SSTable too small",
+            ));
         }
 
         // Read footer
@@ -152,7 +155,10 @@ impl SSTableReader {
         let magic = u64::from_le_bytes(footer[40..48].try_into().unwrap());
 
         if magic != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid SSTable magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid SSTable magic",
+            ));
         }
 
         // Read index block

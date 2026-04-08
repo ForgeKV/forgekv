@@ -95,9 +95,7 @@ impl Compaction {
             for file in &files {
                 if let Ok(reader) = self.get_or_open_reader(file) {
                     // Check key range
-                    if key < reader.smallest_key.as_slice()
-                        || key > reader.largest_key.as_slice()
-                    {
+                    if key < reader.smallest_key.as_slice() || key > reader.largest_key.as_slice() {
                         continue;
                     }
                     if let Some(result) = reader.get(key) {

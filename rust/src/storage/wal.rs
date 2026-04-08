@@ -1,8 +1,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,10 +31,7 @@ pub struct WriteAheadLog {
 
 impl WriteAheadLog {
     pub fn new(path: &Path, write_through: bool, global_seq: Arc<AtomicU64>) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         Ok(WriteAheadLog {
             file: BufWriter::with_capacity(256 * 1024, file),
@@ -112,9 +109,9 @@ impl WriteAheadLog {
 
             let key = buf[pos + 13..pos + 13 + key_len].to_vec();
             let val_len_offset = pos + 13 + key_len;
-            let val_len = u32::from_le_bytes(
-                buf[val_len_offset..val_len_offset + 4].try_into().unwrap(),
-            ) as usize;
+            let val_len =
+                u32::from_le_bytes(buf[val_len_offset..val_len_offset + 4].try_into().unwrap())
+                    as usize;
 
             if val_len_offset + 4 + val_len > buf.len() {
                 break;

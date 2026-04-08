@@ -33,7 +33,7 @@ pub struct RedisMetadata {
     pub expiry_ms: i64, // 0 = no expiry
     pub list_head: i64,
     pub list_tail: i64,
-    pub version: u64,   // Dragonfly-compatible monotonic version counter
+    pub version: u64, // Dragonfly-compatible monotonic version counter
 }
 
 impl RedisMetadata {
@@ -62,7 +62,11 @@ impl RedisMetadata {
         let list_tail = i64::from_le_bytes(data[25..33].try_into().unwrap());
         // Backward compatible: old format is 33 bytes, new is 41
         let version = if data.len() >= METADATA_SIZE_CURRENT {
-            u64::from_le_bytes(data[METADATA_SIZE_LEGACY..METADATA_SIZE_CURRENT].try_into().unwrap())
+            u64::from_le_bytes(
+                data[METADATA_SIZE_LEGACY..METADATA_SIZE_CURRENT]
+                    .try_into()
+                    .unwrap(),
+            )
         } else {
             1
         };

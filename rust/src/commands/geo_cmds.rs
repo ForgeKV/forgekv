@@ -91,8 +91,7 @@ fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let lat2_r = lat2.to_radians();
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
+    let a = (dlat / 2.0).sin().powi(2) + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
     EARTH_RADIUS_M * c
 }
@@ -219,11 +218,7 @@ struct GeoMember {
     dist_m: f64,
 }
 
-fn build_result(
-    members: Vec<GeoMember>,
-    opts: &SearchOptions,
-    unit_factor: f64,
-) -> RespValue {
+fn build_result(members: Vec<GeoMember>, opts: &SearchOptions, unit_factor: f64) -> RespValue {
     let rows: Vec<RespValue> = members
         .into_iter()
         .map(|m| {
@@ -273,7 +268,13 @@ fn radius_search(
             let (lon, lat) = geo_decode(score);
             let dist_m = haversine_m(center_lon, center_lat, lon, lat);
             if dist_m <= radius_m {
-                Some(GeoMember { name, score, lon, lat, dist_m })
+                Some(GeoMember {
+                    name,
+                    score,
+                    lon,
+                    lat,
+                    dist_m,
+                })
             } else {
                 None
             }
@@ -299,7 +300,8 @@ fn box_search(
 ) -> Result<Vec<GeoMember>, crate::database::RedisError> {
     // Convert half-dimensions to degrees (approximate).
     // Redis uses the same approximation.
-    let half_w_deg = (width_m / 2.0) / (EARTH_RADIUS_M * (center_lat.to_radians().cos()) * std::f64::consts::PI / 180.0);
+    let half_w_deg = (width_m / 2.0)
+        / (EARTH_RADIUS_M * (center_lat.to_radians().cos()) * std::f64::consts::PI / 180.0);
     let half_h_deg = (height_m / 2.0) / (EARTH_RADIUS_M * std::f64::consts::PI / 180.0);
 
     let min_lon = center_lon - half_w_deg;
@@ -314,7 +316,13 @@ fn box_search(
             let (lon, lat) = geo_decode(score);
             if lon >= min_lon && lon <= max_lon && lat >= min_lat && lat <= max_lat {
                 let dist_m = haversine_m(center_lon, center_lat, lon, lat);
-                Some(GeoMember { name, score, lon, lat, dist_m })
+                Some(GeoMember {
+                    name,
+                    score,
+                    lon,
+                    lat,
+                    dist_m,
+                })
             } else {
                 None
             }
@@ -437,11 +445,26 @@ impl CommandHandler for GeoAddCommand {
                 break;
             }
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
-                Some("NX") => { nx = true; i += 1; }
-                Some("XX") => { xx = true; i += 1; }
-                Some("GT") => { gt = true; i += 1; }
-                Some("LT") => { lt = true; i += 1; }
-                Some("CH") => { ch = true; i += 1; }
+                Some("NX") => {
+                    nx = true;
+                    i += 1;
+                }
+                Some("XX") => {
+                    xx = true;
+                    i += 1;
+                }
+                Some("GT") => {
+                    gt = true;
+                    i += 1;
+                }
+                Some("LT") => {
+                    lt = true;
+                    i += 1;
+                }
+                Some("CH") => {
+                    ch = true;
+                    i += 1;
+                }
                 _ => break,
             }
         }
@@ -471,13 +494,11 @@ impl CommandHandler for GeoAddCommand {
 
             // Validate ranges
             if lon < GEO_LONG_MIN || lon > GEO_LONG_MAX {
-                return RespValue::error(
-                    "ERR invalid longitude (valid range: -180, 180)"
-                );
+                return RespValue::error("ERR invalid longitude (valid range: -180, 180)");
             }
             if lat < GEO_LAT_MIN || lat > GEO_LAT_MAX {
                 return RespValue::error(
-                    "ERR invalid latitude (valid range: -85.05112878, 85.05112878)"
+                    "ERR invalid latitude (valid range: -85.05112878, 85.05112878)",
                 );
             }
 
@@ -492,7 +513,10 @@ impl CommandHandler for GeoAddCommand {
 
         let pairs_ref: Vec<(f64, &[u8])> = pairs.iter().map(|(s, m)| (*s, m.as_slice())).collect();
 
-        match self.db.zadd_flags(*db_index, key, &pairs_ref, nx, xx, gt, lt, ch, false) {
+        match self
+            .db
+            .zadd_flags(*db_index, key, &pairs_ref, nx, xx, gt, lt, ch, false)
+        {
             Ok((n, _)) => RespValue::integer(n),
             Err(e) => map_err(e),
         }
@@ -532,7 +556,11 @@ impl CommandHandler for GeoDistCommand {
             match args[4].as_str() {
                 Some(s) => match parse_unit(s) {
                     Some(f) => f,
-                    None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+                    None => {
+                        return RespValue::error(
+                            "ERR unsupported unit provided. please use M, KM, FT, MI",
+                        )
+                    }
                 },
                 None => return RespValue::error("ERR unsupported unit"),
             }
@@ -660,7 +688,11 @@ pub struct GeoRadiusCommand {
 
 impl CommandHandler for GeoRadiusCommand {
     fn name(&self) -> &str {
-        if self.read_only { "GEORADIUS_RO" } else { "GEORADIUS" }
+        if self.read_only {
+            "GEORADIUS_RO"
+        } else {
+            "GEORADIUS"
+        }
     }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
@@ -691,7 +723,9 @@ impl CommandHandler for GeoRadiusCommand {
         };
         let unit_factor = match parse_unit(unit_str) {
             Some(f) => f,
-            None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+            None => {
+                return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI")
+            }
         };
         let radius_m = radius * unit_factor;
 
@@ -716,13 +750,22 @@ impl CommandHandler for GeoRadiusCommand {
                         store_dist = true;
                         j += 2;
                     }
-                    _ => { j += 1; }
+                    _ => {
+                        j += 1;
+                    }
                 }
             }
         }
 
         let members = match radius_search(
-            &self.db, *db_index, key, lon, lat, radius_m, &opts, unit_factor,
+            &self.db,
+            *db_index,
+            key,
+            lon,
+            lat,
+            radius_m,
+            &opts,
+            unit_factor,
         ) {
             Ok(m) => m,
             Err(e) => return map_err(e),
@@ -745,13 +788,19 @@ pub struct GeoRadiusByMemberCommand {
 
 impl CommandHandler for GeoRadiusByMemberCommand {
     fn name(&self) -> &str {
-        if self.read_only { "GEORADIUSBYMEMBER_RO" } else { "GEORADIUSBYMEMBER" }
+        if self.read_only {
+            "GEORADIUSBYMEMBER_RO"
+        } else {
+            "GEORADIUSBYMEMBER"
+        }
     }
 
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // GEORADIUSBYMEMBER key member radius M|KM|FT|MI [options...]
         if args.len() < 5 {
-            return RespValue::error("ERR wrong number of arguments for 'georadiusbymember' command");
+            return RespValue::error(
+                "ERR wrong number of arguments for 'georadiusbymember' command",
+            );
         }
         let key = match args[1].as_bytes() {
             Some(k) => k,
@@ -771,7 +820,9 @@ impl CommandHandler for GeoRadiusByMemberCommand {
         };
         let unit_factor = match parse_unit(unit_str) {
             Some(f) => f,
-            None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+            None => {
+                return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI")
+            }
         };
         let radius_m = radius * unit_factor;
 
@@ -804,13 +855,22 @@ impl CommandHandler for GeoRadiusByMemberCommand {
                         store_dist = true;
                         j += 2;
                     }
-                    _ => { j += 1; }
+                    _ => {
+                        j += 1;
+                    }
                 }
             }
         }
 
         let members = match radius_search(
-            &self.db, *db_index, key, center_lon, center_lat, radius_m, &opts, unit_factor,
+            &self.db,
+            *db_index,
+            key,
+            center_lon,
+            center_lat,
+            radius_m,
+            &opts,
+            unit_factor,
         ) {
             Ok(m) => m,
             Err(e) => return map_err(e),
@@ -867,12 +927,20 @@ impl CommandHandler for GeoSearchCommand {
             }
             Some("FROMLONLAT") => {
                 i += 1;
-                let lon: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let lon: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
                 i += 1;
-                let lat: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let lat: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -883,7 +951,10 @@ impl CommandHandler for GeoSearchCommand {
         };
 
         // BY
-        let by_upper = args.get(i).and_then(|a| a.as_str()).map(|s| s.to_uppercase());
+        let by_upper = args
+            .get(i)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase());
         let unit_factor;
         let mut by_box = false;
         let mut box_width_m = 0.0f64;
@@ -893,7 +964,11 @@ impl CommandHandler for GeoSearchCommand {
         match by_upper.as_deref() {
             Some("BYRADIUS") => {
                 i += 1;
-                let radius: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let radius: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -904,7 +979,11 @@ impl CommandHandler for GeoSearchCommand {
                 };
                 unit_factor = match parse_unit(unit_str) {
                     Some(f) => f,
-                    None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+                    None => {
+                        return RespValue::error(
+                            "ERR unsupported unit provided. please use M, KM, FT, MI",
+                        )
+                    }
                 };
                 i += 1;
                 radius_m = radius * unit_factor;
@@ -912,12 +991,20 @@ impl CommandHandler for GeoSearchCommand {
             Some("BYBOX") => {
                 by_box = true;
                 i += 1;
-                let width: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let width: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
                 i += 1;
-                let height: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let height: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -928,7 +1015,11 @@ impl CommandHandler for GeoSearchCommand {
                 };
                 unit_factor = match parse_unit(unit_str) {
                     Some(f) => f,
-                    None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+                    None => {
+                        return RespValue::error(
+                            "ERR unsupported unit provided. please use M, KM, FT, MI",
+                        )
+                    }
                 };
                 i += 1;
                 box_width_m = width * unit_factor;
@@ -942,19 +1033,29 @@ impl CommandHandler for GeoSearchCommand {
 
         let members = if by_box {
             match box_search(
-                &self.db, *db_index, key,
-                center_lon, center_lat,
-                box_width_m, box_height_m,
-                &opts, unit_factor,
+                &self.db,
+                *db_index,
+                key,
+                center_lon,
+                center_lat,
+                box_width_m,
+                box_height_m,
+                &opts,
+                unit_factor,
             ) {
                 Ok(m) => m,
                 Err(e) => return map_err(e),
             }
         } else {
             match radius_search(
-                &self.db, *db_index, key,
-                center_lon, center_lat, radius_m,
-                &opts, unit_factor,
+                &self.db,
+                *db_index,
+                key,
+                center_lon,
+                center_lat,
+                radius_m,
+                &opts,
+                unit_factor,
             ) {
                 Ok(m) => m,
                 Err(e) => return map_err(e),
@@ -1011,12 +1112,20 @@ impl CommandHandler for GeoSearchStoreCommand {
             }
             Some("FROMLONLAT") => {
                 i += 1;
-                let lon: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let lon: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
                 i += 1;
-                let lat: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let lat: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -1027,7 +1136,10 @@ impl CommandHandler for GeoSearchStoreCommand {
         };
 
         // BY
-        let by_upper = args.get(i).and_then(|a| a.as_str()).map(|s| s.to_uppercase());
+        let by_upper = args
+            .get(i)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase());
         let unit_factor;
         let mut by_box = false;
         let mut box_width_m = 0.0f64;
@@ -1037,7 +1149,11 @@ impl CommandHandler for GeoSearchStoreCommand {
         match by_upper.as_deref() {
             Some("BYRADIUS") => {
                 i += 1;
-                let radius: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let radius: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -1048,7 +1164,11 @@ impl CommandHandler for GeoSearchStoreCommand {
                 };
                 unit_factor = match parse_unit(unit_str) {
                     Some(f) => f,
-                    None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+                    None => {
+                        return RespValue::error(
+                            "ERR unsupported unit provided. please use M, KM, FT, MI",
+                        )
+                    }
                 };
                 i += 1;
                 radius_m = radius * unit_factor;
@@ -1056,12 +1176,20 @@ impl CommandHandler for GeoSearchStoreCommand {
             Some("BYBOX") => {
                 by_box = true;
                 i += 1;
-                let width: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let width: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
                 i += 1;
-                let height: f64 = match args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()) {
+                let height: f64 = match args
+                    .get(i)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse().ok())
+                {
                     Some(f) => f,
                     None => return RespValue::error("ERR value is not a valid float"),
                 };
@@ -1072,7 +1200,11 @@ impl CommandHandler for GeoSearchStoreCommand {
                 };
                 unit_factor = match parse_unit(unit_str) {
                     Some(f) => f,
-                    None => return RespValue::error("ERR unsupported unit provided. please use M, KM, FT, MI"),
+                    None => {
+                        return RespValue::error(
+                            "ERR unsupported unit provided. please use M, KM, FT, MI",
+                        )
+                    }
                 };
                 i += 1;
                 box_width_m = width * unit_factor;
@@ -1098,26 +1230,43 @@ impl CommandHandler for GeoSearchStoreCommand {
 
         let members = if by_box {
             match box_search(
-                &self.db, *db_index, source_key,
-                center_lon, center_lat,
-                box_width_m, box_height_m,
-                &opts, unit_factor,
+                &self.db,
+                *db_index,
+                source_key,
+                center_lon,
+                center_lat,
+                box_width_m,
+                box_height_m,
+                &opts,
+                unit_factor,
             ) {
                 Ok(m) => m,
                 Err(e) => return map_err(e),
             }
         } else {
             match radius_search(
-                &self.db, *db_index, source_key,
-                center_lon, center_lat, radius_m,
-                &opts, unit_factor,
+                &self.db,
+                *db_index,
+                source_key,
+                center_lon,
+                center_lat,
+                radius_m,
+                &opts,
+                unit_factor,
             ) {
                 Ok(m) => m,
                 Err(e) => return map_err(e),
             }
         };
 
-        store_results(&self.db, *db_index, &dest_key, &members, store_dist, unit_factor)
+        store_results(
+            &self.db,
+            *db_index,
+            &dest_key,
+            &members,
+            store_dist,
+            unit_factor,
+        )
     }
 }
 

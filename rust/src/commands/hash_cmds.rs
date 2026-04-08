@@ -291,7 +291,10 @@ impl CommandHandler for HKeysCommand {
         };
         match self.db.hgetall(*db_index, key) {
             Ok(pairs) => {
-                let items: Vec<RespValue> = pairs.into_iter().map(|(f, _)| RespValue::bulk_bytes(f)).collect();
+                let items: Vec<RespValue> = pairs
+                    .into_iter()
+                    .map(|(f, _)| RespValue::bulk_bytes(f))
+                    .collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -318,7 +321,10 @@ impl CommandHandler for HValsCommand {
         };
         match self.db.hgetall(*db_index, key) {
             Ok(pairs) => {
-                let items: Vec<RespValue> = pairs.into_iter().map(|(_, v)| RespValue::bulk_bytes(v)).collect();
+                let items: Vec<RespValue> = pairs
+                    .into_iter()
+                    .map(|(_, v)| RespValue::bulk_bytes(v))
+                    .collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -385,7 +391,10 @@ impl CommandHandler for HIncrByFloatCommand {
         };
 
         let current: f64 = match self.db.hget(*db_index, key, field) {
-            Ok(Some(v)) => match std::str::from_utf8(&v).ok().and_then(|s| s.trim().parse().ok()) {
+            Ok(Some(v)) => match std::str::from_utf8(&v)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
                 Some(f) => f,
                 None => return RespValue::error("ERR hash value is not a float"),
             },
@@ -475,7 +484,8 @@ impl CommandHandler for HRandFieldCommand {
             None => return RespValue::error("ERR value is not an integer or out of range"),
         };
 
-        let withvalues = args.get(3)
+        let withvalues = args
+            .get(3)
             .and_then(|a| a.as_str())
             .map(|s| s.to_uppercase() == "WITHVALUES")
             .unwrap_or(false);
@@ -543,7 +553,9 @@ impl CommandHandler for HScanCommand {
                         pattern = args[i].as_str().map(|s| s.to_string());
                     }
                 }
-                Some("COUNT") => { i += 1; } // ignore count
+                Some("COUNT") => {
+                    i += 1;
+                } // ignore count
                 _ => {}
             }
             i += 1;
@@ -600,7 +612,10 @@ impl CommandHandler for HIncrByCommand {
         };
 
         let current: i64 = match self.db.hget(*db_index, key, field) {
-            Ok(Some(v)) => match std::str::from_utf8(&v).ok().and_then(|s| s.trim().parse().ok()) {
+            Ok(Some(v)) => match std::str::from_utf8(&v)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
                 Some(n) => n,
                 None => return RespValue::error("ERR hash value is not an integer"),
             },
@@ -627,7 +642,10 @@ use parking_lot::Mutex as ParkingMutex;
 
 fn now_ms_hash() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 lazy_static::lazy_static! {
@@ -636,46 +654,87 @@ lazy_static::lazy_static! {
 }
 
 fn hfield_expiry(db: usize, key: &[u8], field: &[u8]) -> i64 {
-    *HFIELD_TTL.lock().get(&(db, key.to_vec(), field.to_vec())).unwrap_or(&0)
+    *HFIELD_TTL
+        .lock()
+        .get(&(db, key.to_vec(), field.to_vec()))
+        .unwrap_or(&0)
 }
 
 fn hfield_set_expiry(db: usize, key: &[u8], field: &[u8], expiry_ms: i64) {
-    HFIELD_TTL.lock().insert((db, key.to_vec(), field.to_vec()), expiry_ms);
+    HFIELD_TTL
+        .lock()
+        .insert((db, key.to_vec(), field.to_vec()), expiry_ms);
 }
 
 fn hfield_clear_expiry(db: usize, key: &[u8], field: &[u8]) {
-    HFIELD_TTL.lock().remove(&(db, key.to_vec(), field.to_vec()));
+    HFIELD_TTL
+        .lock()
+        .remove(&(db, key.to_vec(), field.to_vec()));
 }
 
-pub fn hfield_ttl_flush_all() { HFIELD_TTL.lock().clear(); }
+pub fn hfield_ttl_flush_all() {
+    HFIELD_TTL.lock().clear();
+}
 pub fn hfield_ttl_flush_db(db_index: usize) {
     HFIELD_TTL.lock().retain(|(db, _, _), _| *db != db_index);
 }
 
 fn parse_fields_hexp(args: &[RespValue], pos: usize) -> Option<Vec<Vec<u8>>> {
-    if pos + 1 >= args.len() { return None; }
-    if args[pos].as_str().map(|s| s.to_uppercase()).as_deref() != Some("FIELDS") { return None; }
-    let numfields: usize = args[pos+1].as_str()?.parse().ok()?;
-    if pos + 2 + numfields > args.len() { return None; }
-    let fields: Vec<Vec<u8>> = args[pos+2..pos+2+numfields].iter()
-        .filter_map(|a| a.as_bytes().map(|b| b.to_vec())).collect();
-    if fields.len() == numfields { Some(fields) } else { None }
+    if pos + 1 >= args.len() {
+        return None;
+    }
+    if args[pos].as_str().map(|s| s.to_uppercase()).as_deref() != Some("FIELDS") {
+        return None;
+    }
+    let numfields: usize = args[pos + 1].as_str()?.parse().ok()?;
+    if pos + 2 + numfields > args.len() {
+        return None;
+    }
+    let fields: Vec<Vec<u8>> = args[pos + 2..pos + 2 + numfields]
+        .iter()
+        .filter_map(|a| a.as_bytes().map(|b| b.to_vec()))
+        .collect();
+    if fields.len() == numfields {
+        Some(fields)
+    } else {
+        None
+    }
 }
 
-pub struct HExpireCommand { pub db: Arc<RedisDatabase>, pub name: &'static str, pub in_ms: bool, pub is_at: bool }
+pub struct HExpireCommand {
+    pub db: Arc<RedisDatabase>,
+    pub name: &'static str,
+    pub in_ms: bool,
+    pub is_at: bool,
+}
 impl CommandHandler for HExpireCommand {
-    fn name(&self) -> &str { self.name }
+    fn name(&self) -> &str {
+        self.name
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 5 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 5 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let time_val: i64 = match args[2].as_str().and_then(|s| s.parse().ok()) {
             Some(v) => v,
             None => return RespValue::error("ERR value is not an integer or out of range"),
         };
         let expiry_ms = if self.is_at {
-            if self.in_ms { time_val } else { time_val * 1000 }
+            if self.in_ms {
+                time_val
+            } else {
+                time_val * 1000
+            }
         } else {
-            let delta = if self.in_ms { time_val } else { time_val * 1000 };
+            let delta = if self.in_ms {
+                time_val
+            } else {
+                time_val * 1000
+            };
             now_ms_hash() + delta
         };
         let fields = match parse_fields_hexp(args, 3) {
@@ -683,92 +742,144 @@ impl CommandHandler for HExpireCommand {
             None => return RespValue::error("ERR syntax error"),
         };
         let db = *db_index;
-        let results: Vec<RespValue> = fields.iter().map(|field| {
-            match self.db.hget(db, &key, field) {
-                Ok(Some(_)) => { hfield_set_expiry(db, &key, field, expiry_ms); RespValue::integer(1) }
+        let results: Vec<RespValue> = fields
+            .iter()
+            .map(|field| match self.db.hget(db, &key, field) {
+                Ok(Some(_)) => {
+                    hfield_set_expiry(db, &key, field, expiry_ms);
+                    RespValue::integer(1)
+                }
                 Ok(None) => RespValue::integer(2),
                 Err(_) => RespValue::integer(-1),
-            }
-        }).collect();
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
 
-pub struct HTtlCommand { pub db: Arc<RedisDatabase>, pub name: &'static str, pub in_ms: bool }
+pub struct HTtlCommand {
+    pub db: Arc<RedisDatabase>,
+    pub name: &'static str,
+    pub in_ms: bool,
+}
 impl CommandHandler for HTtlCommand {
-    fn name(&self) -> &str { self.name }
+    fn name(&self) -> &str {
+        self.name
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 4 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 4 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let fields = match parse_fields_hexp(args, 2) {
             Some(f) => f,
             None => return RespValue::error("ERR syntax error"),
         };
         let db = *db_index;
         let now = now_ms_hash();
-        let results: Vec<RespValue> = fields.iter().map(|field| {
-            match self.db.hget(db, &key, field) {
+        let results: Vec<RespValue> = fields
+            .iter()
+            .map(|field| match self.db.hget(db, &key, field) {
                 Ok(Some(_)) => {
                     let exp = hfield_expiry(db, &key, field);
-                    if exp == 0 { return RespValue::integer(-1); }
+                    if exp == 0 {
+                        return RespValue::integer(-1);
+                    }
                     let remaining_ms = exp - now;
-                    if remaining_ms <= 0 { hfield_clear_expiry(db, &key, field); RespValue::integer(-2) }
-                    else if self.in_ms { RespValue::integer(remaining_ms) }
-                    else { RespValue::integer((remaining_ms + 999) / 1000) }
+                    if remaining_ms <= 0 {
+                        hfield_clear_expiry(db, &key, field);
+                        RespValue::integer(-2)
+                    } else if self.in_ms {
+                        RespValue::integer(remaining_ms)
+                    } else {
+                        RespValue::integer((remaining_ms + 999) / 1000)
+                    }
                 }
                 Ok(None) => RespValue::integer(-2),
                 Err(_) => RespValue::integer(-1),
-            }
-        }).collect();
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
 
-pub struct HPersistCommand { pub db: Arc<RedisDatabase> }
+pub struct HPersistCommand {
+    pub db: Arc<RedisDatabase>,
+}
 impl CommandHandler for HPersistCommand {
-    fn name(&self) -> &str { "HPERSIST" }
+    fn name(&self) -> &str {
+        "HPERSIST"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 4 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 4 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let fields = match parse_fields_hexp(args, 2) {
             Some(f) => f,
             None => return RespValue::error("ERR syntax error"),
         };
         let db = *db_index;
-        let results: Vec<RespValue> = fields.iter().map(|field| {
-            match self.db.hget(db, &key, field) {
-                Ok(Some(_)) => { hfield_clear_expiry(db, &key, field); RespValue::integer(1) }
+        let results: Vec<RespValue> = fields
+            .iter()
+            .map(|field| match self.db.hget(db, &key, field) {
+                Ok(Some(_)) => {
+                    hfield_clear_expiry(db, &key, field);
+                    RespValue::integer(1)
+                }
                 Ok(None) => RespValue::integer(-2),
                 Err(_) => RespValue::integer(-1),
-            }
-        }).collect();
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
 
-pub struct HExpireTimeCommand { pub db: Arc<RedisDatabase>, pub name: &'static str, pub in_ms: bool }
+pub struct HExpireTimeCommand {
+    pub db: Arc<RedisDatabase>,
+    pub name: &'static str,
+    pub in_ms: bool,
+}
 impl CommandHandler for HExpireTimeCommand {
-    fn name(&self) -> &str { self.name }
+    fn name(&self) -> &str {
+        self.name
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        if args.len() < 4 { return RespValue::error("ERR wrong number of arguments"); }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR") };
+        if args.len() < 4 {
+            return RespValue::error("ERR wrong number of arguments");
+        }
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR"),
+        };
         let fields = match parse_fields_hexp(args, 2) {
             Some(f) => f,
             None => return RespValue::error("ERR syntax error"),
         };
         let db = *db_index;
-        let results: Vec<RespValue> = fields.iter().map(|field| {
-            match self.db.hget(db, &key, field) {
+        let results: Vec<RespValue> = fields
+            .iter()
+            .map(|field| match self.db.hget(db, &key, field) {
                 Ok(Some(_)) => {
                     let exp = hfield_expiry(db, &key, field);
-                    if exp == 0 { RespValue::integer(-1) }
-                    else if self.in_ms { RespValue::integer(exp) }
-                    else { RespValue::integer(exp / 1000) }
+                    if exp == 0 {
+                        RespValue::integer(-1)
+                    } else if self.in_ms {
+                        RespValue::integer(exp)
+                    } else {
+                        RespValue::integer(exp / 1000)
+                    }
                 }
                 Ok(None) => RespValue::integer(-2),
                 Err(_) => RespValue::integer(-1),
-            }
-        }).collect();
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }

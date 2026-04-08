@@ -7,13 +7,12 @@
 /// A Cuckoo filter supports deletion (unlike Bloom filters) at the cost of
 /// slightly higher false-positive rate. This implementation uses a simplified
 /// 2-way cuckoo scheme with 4-slot buckets and 8-bit fingerprints.
-
 use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
-use crate::resp::RespValue;
 use super::CommandHandler;
+use crate::resp::RespValue;
 
 // ── Cuckoo Filter ─────────────────────────────────────────────────────────────
 
@@ -22,14 +21,16 @@ const MAX_KICKS: usize = 500;
 
 #[derive(Clone)]
 struct CuckooFilter {
-    buckets:   Vec<[u8; BUCKET_SIZE]>,  // fingerprints (0 = empty)
+    buckets: Vec<[u8; BUCKET_SIZE]>, // fingerprints (0 = empty)
     num_items: usize,
-    capacity:  usize, // total slots = buckets.len() * BUCKET_SIZE
+    capacity: usize, // total slots = buckets.len() * BUCKET_SIZE
 }
 
 impl CuckooFilter {
     fn new(capacity: usize) -> Self {
-        let num_buckets = ((capacity + BUCKET_SIZE - 1) / BUCKET_SIZE).next_power_of_two().max(1);
+        let num_buckets = ((capacity + BUCKET_SIZE - 1) / BUCKET_SIZE)
+            .next_power_of_two()
+            .max(1);
         CuckooFilter {
             buckets: vec![[0u8; BUCKET_SIZE]; num_buckets],
             num_items: 0,
@@ -40,7 +41,11 @@ impl CuckooFilter {
     fn fingerprint(key: &[u8]) -> u8 {
         let h = fnv1a(key);
         let fp = (h & 0xFF) as u8;
-        if fp == 0 { 1 } else { fp }
+        if fp == 0 {
+            1
+        } else {
+            fp
+        }
     }
 
     fn index1(key: &[u8], num_buckets: usize) -> usize {
@@ -164,13 +169,18 @@ lazy_static::lazy_static! {
 
 pub struct CfReserveCommand;
 impl CommandHandler for CfReserveCommand {
-    fn name(&self) -> &str { "CF.RESERVE" }
+    fn name(&self) -> &str {
+        "CF.RESERVE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // CF.RESERVE key capacity [BUCKETSIZE bucketsize] [MAXITERATIONS maxiterations] [EXPANSION expansion]
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.RESERVE'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
         let capacity: usize = match args[2].as_str().and_then(|s| s.parse().ok()) {
             Some(n) if n > 0 => n,
             _ => return RespValue::error("ERR capacity must be a positive integer"),
@@ -187,13 +197,21 @@ impl CommandHandler for CfReserveCommand {
 
 pub struct CfAddCommand;
 impl CommandHandler for CfAddCommand {
-    fn name(&self) -> &str { "CF.ADD" }
+    fn name(&self) -> &str {
+        "CF.ADD"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.ADD'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let item = match args[2].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR item must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let item = match args[2].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR item must be a string"),
+        };
         let mut store = CF_STORE.lock();
         let cf = store.entry(key).or_insert_with(|| CuckooFilter::new(1024));
         if cf.add(&item) {
@@ -208,13 +226,21 @@ impl CommandHandler for CfAddCommand {
 
 pub struct CfAddNxCommand;
 impl CommandHandler for CfAddNxCommand {
-    fn name(&self) -> &str { "CF.ADDNX" }
+    fn name(&self) -> &str {
+        "CF.ADDNX"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.ADDNX'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let item = match args[2].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR item must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let item = match args[2].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR item must be a string"),
+        };
         let mut store = CF_STORE.lock();
         let cf = store.entry(key).or_insert_with(|| CuckooFilter::new(1024));
         if cf.may_contain(&item) {
@@ -230,15 +256,26 @@ impl CommandHandler for CfAddNxCommand {
 
 // ── CF.INSERT / CF.INSERTNX ───────────────────────────────────────────────────
 
-pub struct CfInsertCommand { pub nx: bool }
+pub struct CfInsertCommand {
+    pub nx: bool,
+}
 impl CommandHandler for CfInsertCommand {
-    fn name(&self) -> &str { if self.nx { "CF.INSERTNX" } else { "CF.INSERT" } }
+    fn name(&self) -> &str {
+        if self.nx {
+            "CF.INSERTNX"
+        } else {
+            "CF.INSERT"
+        }
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // CF.INSERT key [CAPACITY cap] [NOCREATE] ITEMS item [item ...]
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
         let mut capacity = 1024usize;
         let mut nocreate = false;
         let mut items_start = 2;
@@ -246,9 +283,21 @@ impl CommandHandler for CfInsertCommand {
         let mut i = 2;
         while i < args.len() {
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
-                Some("CAPACITY") => { i += 1; capacity = args.get(i).and_then(|a| a.as_str()).and_then(|s| s.parse().ok()).unwrap_or(1024); }
-                Some("NOCREATE") => { nocreate = true; }
-                Some("ITEMS") => { items_start = i + 1; break; }
+                Some("CAPACITY") => {
+                    i += 1;
+                    capacity = args
+                        .get(i)
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1024);
+                }
+                Some("NOCREATE") => {
+                    nocreate = true;
+                }
+                Some("ITEMS") => {
+                    items_start = i + 1;
+                    break;
+                }
                 _ => {}
             }
             i += 1;
@@ -258,18 +307,27 @@ impl CommandHandler for CfInsertCommand {
         if nocreate && !store.contains_key(&key) {
             return RespValue::error("ERR not found");
         }
-        let cf = store.entry(key).or_insert_with(|| CuckooFilter::new(capacity));
+        let cf = store
+            .entry(key)
+            .or_insert_with(|| CuckooFilter::new(capacity));
 
-        let results: Vec<RespValue> = args[items_start..].iter().map(|a| {
-            if let Some(item) = a.as_bytes() {
-                if self.nx && cf.may_contain(item) {
-                    return RespValue::Integer(0);
+        let results: Vec<RespValue> = args[items_start..]
+            .iter()
+            .map(|a| {
+                if let Some(item) = a.as_bytes() {
+                    if self.nx && cf.may_contain(item) {
+                        return RespValue::Integer(0);
+                    }
+                    if cf.add(item) {
+                        RespValue::Integer(1)
+                    } else {
+                        RespValue::Integer(-1)
+                    }
+                } else {
+                    RespValue::Integer(-1)
                 }
-                if cf.add(item) { RespValue::Integer(1) } else { RespValue::Integer(-1) }
-            } else {
-                RespValue::Integer(-1)
-            }
-        }).collect();
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
@@ -278,13 +336,21 @@ impl CommandHandler for CfInsertCommand {
 
 pub struct CfExistsCommand;
 impl CommandHandler for CfExistsCommand {
-    fn name(&self) -> &str { "CF.EXISTS" }
+    fn name(&self) -> &str {
+        "CF.EXISTS"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.EXISTS'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let item = match args[2].as_bytes() { Some(b) => b, None => return RespValue::error("ERR item must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let item = match args[2].as_bytes() {
+            Some(b) => b,
+            None => return RespValue::error("ERR item must be a string"),
+        };
         let store = CF_STORE.lock();
         match store.get(&key) {
             Some(cf) => RespValue::Integer(if cf.may_contain(item) { 1 } else { 0 }),
@@ -297,21 +363,38 @@ impl CommandHandler for CfExistsCommand {
 
 pub struct CfMExistsCommand;
 impl CommandHandler for CfMExistsCommand {
-    fn name(&self) -> &str { "CF.MEXISTS" }
+    fn name(&self) -> &str {
+        "CF.MEXISTS"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.MEXISTS'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
         let store = CF_STORE.lock();
         let cf = store.get(&key);
-        let results: Vec<RespValue> = args[2..].iter().map(|a| {
-            if let Some(item) = a.as_bytes() {
-                RespValue::Integer(match cf { Some(f) => if f.may_contain(item) { 1 } else { 0 }, None => 0 })
-            } else {
-                RespValue::Integer(0)
-            }
-        }).collect();
+        let results: Vec<RespValue> = args[2..]
+            .iter()
+            .map(|a| {
+                if let Some(item) = a.as_bytes() {
+                    RespValue::Integer(match cf {
+                        Some(f) => {
+                            if f.may_contain(item) {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        None => 0,
+                    })
+                } else {
+                    RespValue::Integer(0)
+                }
+            })
+            .collect();
         RespValue::Array(Some(results))
     }
 }
@@ -320,13 +403,21 @@ impl CommandHandler for CfMExistsCommand {
 
 pub struct CfDelCommand;
 impl CommandHandler for CfDelCommand {
-    fn name(&self) -> &str { "CF.DEL" }
+    fn name(&self) -> &str {
+        "CF.DEL"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.DEL'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let item = match args[2].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR item must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let item = match args[2].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR item must be a string"),
+        };
         let mut store = CF_STORE.lock();
         match store.get_mut(&key) {
             Some(cf) => RespValue::Integer(if cf.delete(&item) { 1 } else { 0 }),
@@ -339,13 +430,21 @@ impl CommandHandler for CfDelCommand {
 
 pub struct CfCountCommand;
 impl CommandHandler for CfCountCommand {
-    fn name(&self) -> &str { "CF.COUNT" }
+    fn name(&self) -> &str {
+        "CF.COUNT"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.COUNT'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let item = match args[2].as_bytes() { Some(b) => b, None => return RespValue::error("ERR item must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let item = match args[2].as_bytes() {
+            Some(b) => b,
+            None => return RespValue::error("ERR item must be a string"),
+        };
         let store = CF_STORE.lock();
         match store.get(&key) {
             Some(cf) => RespValue::Integer(cf.count(item) as i64),
@@ -358,12 +457,17 @@ impl CommandHandler for CfCountCommand {
 
 pub struct CfInfoCommand;
 impl CommandHandler for CfInfoCommand {
-    fn name(&self) -> &str { "CF.INFO" }
+    fn name(&self) -> &str {
+        "CF.INFO"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'CF.INFO'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
         let store = CF_STORE.lock();
         match store.get(&key) {
             None => RespValue::error("ERR not found"),
@@ -395,7 +499,9 @@ impl CommandHandler for CfInfoCommand {
 
 pub struct CfCompactCommand;
 impl CommandHandler for CfCompactCommand {
-    fn name(&self) -> &str { "CF.COMPACT" }
+    fn name(&self) -> &str {
+        "CF.COMPACT"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'CF.COMPACT'");
@@ -409,12 +515,17 @@ impl CommandHandler for CfCompactCommand {
 
 pub struct CfScanDumpCommand;
 impl CommandHandler for CfScanDumpCommand {
-    fn name(&self) -> &str { "CF.SCANDUMP" }
+    fn name(&self) -> &str {
+        "CF.SCANDUMP"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'CF.SCANDUMP'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
         let iter: i64 = args[2].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
         let store = CF_STORE.lock();
         match store.get(&key) {
@@ -447,13 +558,21 @@ impl CommandHandler for CfScanDumpCommand {
 
 pub struct CfLoadChunkCommand;
 impl CommandHandler for CfLoadChunkCommand {
-    fn name(&self) -> &str { "CF.LOADCHUNK" }
+    fn name(&self) -> &str {
+        "CF.LOADCHUNK"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 4 {
             return RespValue::error("ERR wrong number of arguments for 'CF.LOADCHUNK'");
         }
-        let key = match args[1].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR key must be a string") };
-        let data = match args[3].as_bytes() { Some(b) => b.to_vec(), None => return RespValue::error("ERR data must be a string") };
+        let key = match args[1].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR key must be a string"),
+        };
+        let data = match args[3].as_bytes() {
+            Some(b) => b.to_vec(),
+            None => return RespValue::error("ERR data must be a string"),
+        };
         if data.len() < 16 {
             return RespValue::error("ERR invalid cuckoo filter data");
         }

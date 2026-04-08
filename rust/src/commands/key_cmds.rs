@@ -99,7 +99,10 @@ impl CommandHandler for ExpireCommand {
         // Negative or zero: expire immediately (key is deleted on next access)
         let expiry_ms = if secs <= 0 { 1 } else { now_ms() + secs * 1000 };
         if args.len() == 4 {
-            let opt = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let opt = args[3]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let cond = match opt.as_str() {
                 "NX" => 0u8,
                 "XX" => 1u8,
@@ -145,7 +148,10 @@ impl CommandHandler for PExpireCommand {
         // Negative or zero: expire immediately (key is deleted on next access)
         let expiry_ms = if ms <= 0 { 1 } else { now_ms() + ms };
         if args.len() == 4 {
-            let opt = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let opt = args[3]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let cond = match opt.as_str() {
                 "NX" => 0u8,
                 "XX" => 1u8,
@@ -191,7 +197,10 @@ impl CommandHandler for ExpireAtCommand {
         // Negative or zero timestamp: expire immediately
         let expiry_ms = if unix_secs <= 0 { 1 } else { unix_secs * 1000 };
         if args.len() == 4 {
-            let opt = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let opt = args[3]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let cond = match opt.as_str() {
                 "NX" => 0u8,
                 "XX" => 1u8,
@@ -237,7 +246,10 @@ impl CommandHandler for PExpireAtCommand {
         // Negative or zero timestamp: expire immediately
         let expiry_ms = if raw_expiry_ms <= 0 { 1 } else { raw_expiry_ms };
         if args.len() == 4 {
-            let opt = args[3].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+            let opt = args[3]
+                .as_str()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_default();
             let cond = match opt.as_str() {
                 "NX" => 0u8,
                 "XX" => 1u8,
@@ -587,7 +599,13 @@ impl CommandHandler for ScanCommandV2 {
             i += 1;
         }
 
-        match self.db.scan_with_type(*db_index, cursor, pattern.as_deref(), count, type_filter.as_deref()) {
+        match self.db.scan_with_type(
+            *db_index,
+            cursor,
+            pattern.as_deref(),
+            count,
+            type_filter.as_deref(),
+        ) {
             Ok((next_cursor, keys)) => {
                 let items: Vec<RespValue> = keys.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(vec![
@@ -605,7 +623,9 @@ pub struct MoveCommand {
 }
 
 impl CommandHandler for MoveCommand {
-    fn name(&self) -> &str { "MOVE" }
+    fn name(&self) -> &str {
+        "MOVE"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 3 {
             return RespValue::error("ERR wrong number of arguments for 'move' command");
@@ -630,7 +650,9 @@ pub struct CopyCommand {
 }
 
 impl CommandHandler for CopyCommand {
-    fn name(&self) -> &str { "COPY" }
+    fn name(&self) -> &str {
+        "COPY"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'copy' command");
@@ -651,10 +673,15 @@ impl CommandHandler for CopyCommand {
                 Some("DB") => {
                     i += 1;
                     if i < args.len() {
-                        dst_db = args[i].as_str().and_then(|s| s.parse().ok()).unwrap_or(*db_index);
+                        dst_db = args[i]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(*db_index);
                     }
                 }
-                Some("REPLACE") => { replace = true; }
+                Some("REPLACE") => {
+                    replace = true;
+                }
                 _ => {}
             }
             i += 1;
@@ -671,7 +698,9 @@ pub struct SortCommand {
 }
 
 impl CommandHandler for SortCommand {
-    fn name(&self) -> &str { "SORT" }
+    fn name(&self) -> &str {
+        "SORT"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'sort' command");
@@ -687,13 +716,25 @@ impl CommandHandler for SortCommand {
         let mut i = 2;
         while i < args.len() {
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
-                Some("ALPHA") => { alpha = true; }
-                Some("DESC") => { desc = true; }
-                Some("ASC") => { desc = false; }
+                Some("ALPHA") => {
+                    alpha = true;
+                }
+                Some("DESC") => {
+                    desc = true;
+                }
+                Some("ASC") => {
+                    desc = false;
+                }
                 Some("LIMIT") => {
                     if i + 2 < args.len() {
-                        let offset = args[i+1].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-                        let count = args[i+2].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(-1);
+                        let offset = args[i + 1]
+                            .as_str()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        let count = args[i + 2]
+                            .as_str()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(-1);
                         limit = Some((offset, count));
                         i += 2;
                     }
@@ -705,7 +746,9 @@ impl CommandHandler for SortCommand {
                     }
                 }
                 // BY and GET are not implemented (stubs to avoid error)
-                Some("BY") | Some("GET") => { i += 1; }
+                Some("BY") | Some("GET") => {
+                    i += 1;
+                }
                 _ => {}
             }
             i += 1;
@@ -722,7 +765,8 @@ impl CommandHandler for SortCommand {
                     }
                     RespValue::integer(count)
                 } else {
-                    let vals: Vec<RespValue> = items.into_iter().map(RespValue::bulk_bytes).collect();
+                    let vals: Vec<RespValue> =
+                        items.into_iter().map(RespValue::bulk_bytes).collect();
                     RespValue::Array(Some(vals))
                 }
             }
@@ -736,7 +780,9 @@ pub struct DumpCommand {
 }
 
 impl CommandHandler for DumpCommand {
-    fn name(&self) -> &str { "DUMP" }
+    fn name(&self) -> &str {
+        "DUMP"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 2 {
             return RespValue::error("ERR wrong number of arguments for 'dump' command");
@@ -844,7 +890,9 @@ pub struct RestoreCommand {
 }
 
 impl CommandHandler for RestoreCommand {
-    fn name(&self) -> &str { "RESTORE" }
+    fn name(&self) -> &str {
+        "RESTORE"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME seconds] [FREQ frequency]
         if args.len() < 4 {
@@ -865,10 +913,18 @@ impl CommandHandler for RestoreCommand {
         let mut i = 4;
         while i < args.len() {
             match args[i].as_str().map(|s| s.to_uppercase()).as_deref() {
-                Some("REPLACE") => { replace = true; }
-                Some("ABSTTL") => { absttl = true; }
-                Some("IDLETIME") => { i += 1; } // skip value
-                Some("FREQ") => { i += 1; } // skip value
+                Some("REPLACE") => {
+                    replace = true;
+                }
+                Some("ABSTTL") => {
+                    absttl = true;
+                }
+                Some("IDLETIME") => {
+                    i += 1;
+                } // skip value
+                Some("FREQ") => {
+                    i += 1;
+                } // skip value
                 _ => {}
             }
             i += 1;
@@ -877,7 +933,9 @@ impl CommandHandler for RestoreCommand {
         // Check if key exists
         if !replace {
             match self.db.exists(*db_index, &[key.as_slice()]) {
-                Ok(n) if n > 0 => return RespValue::error("BUSYKEY Target key name already exists."),
+                Ok(n) if n > 0 => {
+                    return RespValue::error("BUSYKEY Target key name already exists.")
+                }
                 _ => {}
             }
         }
@@ -887,7 +945,7 @@ impl CommandHandler for RestoreCommand {
             return RespValue::error("ERR DUMP payload version or checksum are wrong");
         }
         let type_byte = data[0];
-        let content = &data[1..data.len()-10]; // strip type byte, rdb_ver(2), crc64(8)
+        let content = &data[1..data.len() - 10]; // strip type byte, rdb_ver(2), crc64(8)
 
         // Compute expiry
         let expiry = if ttl_ms == 0 {
@@ -907,7 +965,10 @@ impl CommandHandler for RestoreCommand {
                     Some(r) => r,
                     None => return err,
                 };
-                match self.db.string_set(*db_index, &key, &val, expiry, false, false) {
+                match self
+                    .db
+                    .string_set(*db_index, &key, &val, expiry, false, false)
+                {
                     Ok(()) => RespValue::ok(),
                     Err(e) => RespValue::error(&e.to_string()),
                 }
@@ -936,7 +997,9 @@ impl CommandHandler for RestoreCommand {
                         return RespValue::error("ERR error restoring list");
                     }
                 }
-                if expiry > 0 { let _ = self.db.expire(*db_index, &key, expiry); }
+                if expiry > 0 {
+                    let _ = self.db.expire(*db_index, &key, expiry);
+                }
                 RespValue::ok()
             }
             4 => {
@@ -948,79 +1011,105 @@ impl CommandHandler for RestoreCommand {
                 let _ = self.db.delete(*db_index, &[key.as_slice()]);
                 for _ in 0..count {
                     let (field, fc) = match decode_rdb_string(&content[pos..]) {
-                        Some(r) => r, None => return err,
+                        Some(r) => r,
+                        None => return err,
                     };
                     pos += fc;
                     let (val, vc) = match decode_rdb_string(&content[pos..]) {
-                        Some(r) => r, None => return err,
+                        Some(r) => r,
+                        None => return err,
                     };
                     pos += vc;
-                    if self.db.hset(*db_index, &key, &[(field.as_slice(), val.as_slice())]).is_err() {
+                    if self
+                        .db
+                        .hset(*db_index, &key, &[(field.as_slice(), val.as_slice())])
+                        .is_err()
+                    {
                         return RespValue::error("ERR error restoring hash");
                     }
                 }
-                if expiry > 0 { let _ = self.db.expire(*db_index, &key, expiry); }
+                if expiry > 0 {
+                    let _ = self.db.expire(*db_index, &key, expiry);
+                }
                 RespValue::ok()
             }
             2 => {
                 // RDB_TYPE_SET: [count][member]...
                 let (count, mut pos) = match decode_rdb_length(content) {
-                    Some(r) => r, None => return err,
+                    Some(r) => r,
+                    None => return err,
                 };
                 let _ = self.db.delete(*db_index, &[key.as_slice()]);
                 for _ in 0..count {
                     let (member, mc) = match decode_rdb_string(&content[pos..]) {
-                        Some(r) => r, None => return err,
+                        Some(r) => r,
+                        None => return err,
                     };
                     pos += mc;
                     if self.db.sadd(*db_index, &key, &[member.as_slice()]).is_err() {
                         return RespValue::error("ERR error restoring set");
                     }
                 }
-                if expiry > 0 { let _ = self.db.expire(*db_index, &key, expiry); }
+                if expiry > 0 {
+                    let _ = self.db.expire(*db_index, &key, expiry);
+                }
                 RespValue::ok()
             }
             5 => {
                 // RDB_TYPE_ZSET_2: [count][member][score_f64_le]...
                 let (count, mut pos) = match decode_rdb_length(content) {
-                    Some(r) => r, None => return err,
+                    Some(r) => r,
+                    None => return err,
                 };
                 let _ = self.db.delete(*db_index, &[key.as_slice()]);
                 for _ in 0..count {
                     let (member, mc) = match decode_rdb_string(&content[pos..]) {
-                        Some(r) => r, None => return err,
+                        Some(r) => r,
+                        None => return err,
                     };
                     pos += mc;
-                    if pos + 8 > content.len() { return err; }
-                    let score = f64::from_le_bytes(content[pos..pos+8].try_into().unwrap());
+                    if pos + 8 > content.len() {
+                        return err;
+                    }
+                    let score = f64::from_le_bytes(content[pos..pos + 8].try_into().unwrap());
                     pos += 8;
-                    if self.db.zadd(*db_index, &key, &[(score, member.as_slice())]).is_err() {
+                    if self
+                        .db
+                        .zadd(*db_index, &key, &[(score, member.as_slice())])
+                        .is_err()
+                    {
                         return RespValue::error("ERR error restoring zset");
                     }
                 }
-                if expiry > 0 { let _ = self.db.expire(*db_index, &key, expiry); }
+                if expiry > 0 {
+                    let _ = self.db.expire(*db_index, &key, expiry);
+                }
                 RespValue::ok()
             }
-            _ => {
-                RespValue::error("ERR DUMP payload version or checksum are wrong")
-            }
+            _ => RespValue::error("ERR DUMP payload version or checksum are wrong"),
         }
     }
 }
 
 fn decode_rdb_length(data: &[u8]) -> Option<(u64, usize)> {
-    if data.is_empty() { return None; }
+    if data.is_empty() {
+        return None;
+    }
     let first = data[0];
     let enc_type = (first & 0xC0) >> 6;
     match enc_type {
         0 => Some(((first & 0x3F) as u64, 1)),
         1 => {
-            if data.len() < 2 { return None; }
+            if data.len() < 2 {
+                return None;
+            }
             let len = (((first & 0x3F) as u64) << 8) | data[1] as u64;
             Some((len, 2))
         }
         2 => {
-            if data.len() < 5 { return None; }
+            if data.len() < 5 {
+                return None;
+            }
             let len = u32::from_be_bytes(data[1..5].try_into().ok()?) as u64;
             Some((len, 5))
         }
@@ -1041,7 +1130,7 @@ fn decode_rdb_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
             if data.len() < 1 + len {
                 return None;
             }
-            Some((data[1..1+len].to_vec(), 1 + len))
+            Some((data[1..1 + len].to_vec(), 1 + len))
         }
         1 => {
             // 14-bit length
@@ -1052,7 +1141,7 @@ fn decode_rdb_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
             if data.len() < 2 + len {
                 return None;
             }
-            Some((data[2..2+len].to_vec(), 2 + len))
+            Some((data[2..2 + len].to_vec(), 2 + len))
         }
         2 => {
             // 32-bit length (big-endian)
@@ -1063,7 +1152,7 @@ fn decode_rdb_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
             if data.len() < 5 + len {
                 return None;
             }
-            Some((data[5..5+len].to_vec(), 5 + len))
+            Some((data[5..5 + len].to_vec(), 5 + len))
         }
         3 => {
             // Special encoding
@@ -1071,19 +1160,25 @@ fn decode_rdb_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
             match enc {
                 0 => {
                     // 8-bit integer
-                    if data.len() < 2 { return None; }
+                    if data.len() < 2 {
+                        return None;
+                    }
                     let n = data[1] as i8;
                     Some((n.to_string().into_bytes(), 2))
                 }
                 1 => {
                     // 16-bit integer LE
-                    if data.len() < 3 { return None; }
+                    if data.len() < 3 {
+                        return None;
+                    }
                     let n = i16::from_le_bytes(data[1..3].try_into().ok()?);
                     Some((n.to_string().into_bytes(), 3))
                 }
                 2 => {
                     // 32-bit integer LE
-                    if data.len() < 5 { return None; }
+                    if data.len() < 5 {
+                        return None;
+                    }
                     let n = i32::from_le_bytes(data[1..5].try_into().ok()?);
                     Some((n.to_string().into_bytes(), 5))
                 }
@@ -1099,7 +1194,9 @@ pub struct ExpiretimeCommand {
 }
 
 impl CommandHandler for ExpiretimeCommand {
-    fn name(&self) -> &str { "EXPIRETIME" }
+    fn name(&self) -> &str {
+        "EXPIRETIME"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 2 {
             return RespValue::error("ERR wrong number of arguments for 'expiretime' command");
@@ -1120,7 +1217,9 @@ pub struct PExpiretimeCommand {
 }
 
 impl CommandHandler for PExpiretimeCommand {
-    fn name(&self) -> &str { "PEXPIRETIME" }
+    fn name(&self) -> &str {
+        "PEXPIRETIME"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 2 {
             return RespValue::error("ERR wrong number of arguments for 'pexpiretime' command");
@@ -1143,9 +1242,14 @@ pub struct SortRoCommand {
 }
 
 impl super::CommandHandler for SortRoCommand {
-    fn name(&self) -> &str { "SORT_RO" }
+    fn name(&self) -> &str {
+        "SORT_RO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // SORT_RO is SORT without STORE option
-        SortCommand { db: self.db.clone() }.execute(db_index, args)
+        SortCommand {
+            db: self.db.clone(),
+        }
+        .execute(db_index, args)
     }
 }

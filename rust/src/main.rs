@@ -4,10 +4,10 @@ mod acl;
 mod blocking;
 mod commands;
 mod config;
+mod database;
 mod ext_type_registry;
 mod keyspace;
 mod lua_engine;
-mod database;
 mod pubsub;
 mod resp;
 mod server;
@@ -17,15 +17,15 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use acl::AclManager;
 use commands::server_cmds::*;
 use commands::CommandRegistry;
 use config::ServerConfig;
 use database::RedisDatabase;
+use parking_lot::RwLock;
 use pubsub::PubSubHub;
 use server::TcpServer;
 use storage::LsmStorage;
-use acl::AclManager;
-use parking_lot::RwLock;
 
 pub struct ServerInfoData {
     pub num_dbs: usize,
@@ -46,17 +46,17 @@ fn register_all(
     use commands::bf_cmds::*;
     use commands::cf_cmds::*;
     use commands::geo_cmds::*;
-    use commands::json_cmds::*;
-    use commands::probabilistic_cmds::*;
-    use commands::search_cmds::*;
-    use commands::stream_cmds::*;
-    use commands::tdigest_cmds::*;
     use commands::hash_cmds::*;
     use commands::hll_cmds::*;
+    use commands::json_cmds::*;
     use commands::key_cmds::*;
     use commands::list_cmds::*;
+    use commands::probabilistic_cmds::*;
+    use commands::search_cmds::*;
     use commands::set_cmds::*;
+    use commands::stream_cmds::*;
     use commands::string_cmds::*;
+    use commands::tdigest_cmds::*;
     use commands::zset_cmds::*;
 
     let cfg_snap = config.read().clone();
@@ -151,15 +151,51 @@ fn register_all(
     registry.register(Arc::new(HRandFieldCommand { db: db.clone() }));
     registry.register(Arc::new(HScanCommand { db: db.clone() }));
     // Hash field TTL (Redis 7.4+)
-    registry.register(Arc::new(HExpireCommand { db: db.clone(), name: "HEXPIRE", in_ms: false, is_at: false }));
-    registry.register(Arc::new(HExpireCommand { db: db.clone(), name: "HPEXPIRE", in_ms: true, is_at: false }));
-    registry.register(Arc::new(HExpireCommand { db: db.clone(), name: "HEXPIREAT", in_ms: false, is_at: true }));
-    registry.register(Arc::new(HExpireCommand { db: db.clone(), name: "HPEXPIREAT", in_ms: true, is_at: true }));
-    registry.register(Arc::new(HTtlCommand { db: db.clone(), name: "HTTL", in_ms: false }));
-    registry.register(Arc::new(HTtlCommand { db: db.clone(), name: "HPTTL", in_ms: true }));
+    registry.register(Arc::new(HExpireCommand {
+        db: db.clone(),
+        name: "HEXPIRE",
+        in_ms: false,
+        is_at: false,
+    }));
+    registry.register(Arc::new(HExpireCommand {
+        db: db.clone(),
+        name: "HPEXPIRE",
+        in_ms: true,
+        is_at: false,
+    }));
+    registry.register(Arc::new(HExpireCommand {
+        db: db.clone(),
+        name: "HEXPIREAT",
+        in_ms: false,
+        is_at: true,
+    }));
+    registry.register(Arc::new(HExpireCommand {
+        db: db.clone(),
+        name: "HPEXPIREAT",
+        in_ms: true,
+        is_at: true,
+    }));
+    registry.register(Arc::new(HTtlCommand {
+        db: db.clone(),
+        name: "HTTL",
+        in_ms: false,
+    }));
+    registry.register(Arc::new(HTtlCommand {
+        db: db.clone(),
+        name: "HPTTL",
+        in_ms: true,
+    }));
     registry.register(Arc::new(HPersistCommand { db: db.clone() }));
-    registry.register(Arc::new(HExpireTimeCommand { db: db.clone(), name: "HEXPIRETIME", in_ms: false }));
-    registry.register(Arc::new(HExpireTimeCommand { db: db.clone(), name: "HPEXPIRETIME", in_ms: true }));
+    registry.register(Arc::new(HExpireTimeCommand {
+        db: db.clone(),
+        name: "HEXPIRETIME",
+        in_ms: false,
+    }));
+    registry.register(Arc::new(HExpireTimeCommand {
+        db: db.clone(),
+        name: "HPEXPIRETIME",
+        in_ms: true,
+    }));
 
     // ── List commands ─────────────────────────────────────────────────────────
     registry.register(Arc::new(LPushCommand { db: db.clone() }));
@@ -264,10 +300,22 @@ fn register_all(
     registry.register(Arc::new(GeoDistCommand { db: db.clone() }));
     registry.register(Arc::new(GeoPosCommand { db: db.clone() }));
     registry.register(Arc::new(GeoHashCommand { db: db.clone() }));
-    registry.register(Arc::new(GeoRadiusCommand { db: db.clone(), read_only: false }));
-    registry.register(Arc::new(GeoRadiusCommand { db: db.clone(), read_only: true }));
-    registry.register(Arc::new(GeoRadiusByMemberCommand { db: db.clone(), read_only: false }));
-    registry.register(Arc::new(GeoRadiusByMemberCommand { db: db.clone(), read_only: true }));
+    registry.register(Arc::new(GeoRadiusCommand {
+        db: db.clone(),
+        read_only: false,
+    }));
+    registry.register(Arc::new(GeoRadiusCommand {
+        db: db.clone(),
+        read_only: true,
+    }));
+    registry.register(Arc::new(GeoRadiusByMemberCommand {
+        db: db.clone(),
+        read_only: false,
+    }));
+    registry.register(Arc::new(GeoRadiusByMemberCommand {
+        db: db.clone(),
+        read_only: true,
+    }));
     registry.register(Arc::new(GeoSearchCommand { db: db.clone() }));
     registry.register(Arc::new(GeoSearchStoreCommand { db: db.clone() }));
 
@@ -308,7 +356,9 @@ fn register_all(
     registry.register(Arc::new(JsonGetCommand));
     registry.register(Arc::new(JsonMGetCommand));
     registry.register(Arc::new(JsonDelCommand { name: "JSON.DEL" }));
-    registry.register(Arc::new(JsonDelCommand { name: "JSON.FORGET" }));
+    registry.register(Arc::new(JsonDelCommand {
+        name: "JSON.FORGET",
+    }));
     registry.register(Arc::new(JsonTypeCommand));
     registry.register(Arc::new(JsonNumIncrByCommand));
     registry.register(Arc::new(JsonNumMultByCommand));
@@ -352,7 +402,9 @@ fn register_all(
 
     // ── Server commands ───────────────────────────────────────────────────────
     registry.register(Arc::new(PingCommand));
-    registry.register(Arc::new(SelectCommand { num_dbs: db.num_dbs }));
+    registry.register(Arc::new(SelectCommand {
+        num_dbs: db.num_dbs,
+    }));
     registry.register(Arc::new(FlushAllCommand { db: db.clone() }));
     registry.register(Arc::new(FlushDbCommand { db: db.clone() }));
     registry.register(Arc::new(InfoCommand {
@@ -363,7 +415,9 @@ fn register_all(
     registry.register(Arc::new(DbSizeCommand { db: db.clone() }));
     registry.register(Arc::new(CommandCommand));
     registry.register(Arc::new(EchoCommand));
-    registry.register(Arc::new(ConfigCommand { config: config.clone() }));
+    registry.register(Arc::new(ConfigCommand {
+        config: config.clone(),
+    }));
 
     // CLIENT/AUTH are handled in server.rs; register fallback stubs
     registry.register(Arc::new(ClientCommand));
@@ -374,8 +428,12 @@ fn register_all(
 
     registry.register(Arc::new(QuitCommand));
     registry.register(Arc::new(DebugCommand));
-    registry.register(Arc::new(SlowlogCommand { store: slowlog_store }));
-    registry.register(Arc::new(LatencyCommand { store: latency_store }));
+    registry.register(Arc::new(SlowlogCommand {
+        store: slowlog_store,
+    }));
+    registry.register(Arc::new(LatencyCommand {
+        store: latency_store,
+    }));
     registry.register(Arc::new(MemoryCommand { db: db.clone() }));
     registry.register(Arc::new(SaveCommand));
     registry.register(Arc::new(BgSaveCommand));
@@ -389,17 +447,32 @@ fn register_all(
     registry.register(Arc::new(SwapDbCommand { db: db.clone() }));
     registry.register(Arc::new(WaitCommand));
     registry.register(Arc::new(WaitAofCommand));
-    registry.register(Arc::new(ObjectCommand { db: db.clone(), config: config.clone() }));
+    registry.register(Arc::new(ObjectCommand {
+        db: db.clone(),
+        config: config.clone(),
+    }));
     registry.register(Arc::new(ResetCommand));
     registry.register(Arc::new(LolwutCommand));
     registry.register(Arc::new(ScriptCommand));
-    registry.register(Arc::new(EvalCommand { registry: registry.clone() }));
-    registry.register(Arc::new(EvalshaCommand { registry: registry.clone() }));
-    registry.register(Arc::new(EvalRoCommand { registry: registry.clone() }));
-    registry.register(Arc::new(EvalshaRoCommand { registry: registry.clone() }));
+    registry.register(Arc::new(EvalCommand {
+        registry: registry.clone(),
+    }));
+    registry.register(Arc::new(EvalshaCommand {
+        registry: registry.clone(),
+    }));
+    registry.register(Arc::new(EvalRoCommand {
+        registry: registry.clone(),
+    }));
+    registry.register(Arc::new(EvalshaRoCommand {
+        registry: registry.clone(),
+    }));
     registry.register(Arc::new(FunctionCommand));
-    registry.register(Arc::new(FcallCommand { registry: registry.clone() }));
-    registry.register(Arc::new(FcallRoCommand { registry: registry.clone() }));
+    registry.register(Arc::new(FcallCommand {
+        registry: registry.clone(),
+    }));
+    registry.register(Arc::new(FcallRoCommand {
+        registry: registry.clone(),
+    }));
     registry.register(Arc::new(AclCommand {
         acl: acl.clone(),
         current_username: "default".to_string(),
@@ -426,7 +499,9 @@ fn register_all(
     registry.register(Arc::new(FtInfoCommand));
     registry.register(Arc::new(FtListCommand));
     registry.register(Arc::new(FtExplainCommand { name: "FT.EXPLAIN" }));
-    registry.register(Arc::new(FtExplainCommand { name: "FT.EXPLAINCL" }));
+    registry.register(Arc::new(FtExplainCommand {
+        name: "FT.EXPLAINCL",
+    }));
     registry.register(Arc::new(FtAlterCommand));
     registry.register(Arc::new(FtAliasAddCommand));
     registry.register(Arc::new(FtAliasDel));
@@ -486,7 +561,10 @@ async fn main() {
         ServerConfig::default()
     };
 
-    eprintln!("Starting ForgeKV on {}:{}", base_config.bind, base_config.port);
+    eprintln!(
+        "Starting ForgeKV on {}:{}",
+        base_config.bind, base_config.port
+    );
     eprintln!("Data directory: {}", base_config.dir);
 
     // Shared config (writable at runtime via CONFIG SET)
@@ -543,7 +621,8 @@ async fn main() {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
             let mut sigint = signal(SignalKind::interrupt()).expect("Failed to listen for SIGINT");
             tokio::select! {
                 _ = sigterm.recv() => eprintln!("\nReceived SIGTERM — flushing storage..."),
@@ -552,7 +631,9 @@ async fn main() {
         }
         #[cfg(not(unix))]
         {
-            tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for Ctrl+C");
             eprintln!("\nReceived shutdown signal — flushing storage...");
         }
         storage_for_shutdown.close();

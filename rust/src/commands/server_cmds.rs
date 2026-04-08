@@ -136,9 +136,7 @@ impl LatencyStore {
         let events = self.events.lock();
         events
             .iter()
-            .filter_map(|(name, history)| {
-                history.last().map(|(ts, lat)| (name.clone(), *ts, *lat))
-            })
+            .filter_map(|(name, history)| history.last().map(|(ts, lat)| (name.clone(), *ts, *lat)))
             .collect()
     }
 
@@ -149,7 +147,9 @@ impl LatencyStore {
     pub fn reset(&self, event: Option<&str>) {
         let mut events = self.events.lock();
         match event {
-            Some(e) => { events.remove(e); }
+            Some(e) => {
+                events.remove(e);
+            }
             None => events.clear(),
         }
     }
@@ -160,7 +160,9 @@ impl LatencyStore {
 pub struct PingCommand;
 
 impl CommandHandler for PingCommand {
-    fn name(&self) -> &str { "PING" }
+    fn name(&self) -> &str {
+        "PING"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() > 1 {
             if let Some(msg) = args[1].as_bytes() {
@@ -178,7 +180,9 @@ pub struct SelectCommand {
 }
 
 impl CommandHandler for SelectCommand {
-    fn name(&self) -> &str { "SELECT" }
+    fn name(&self) -> &str {
+        "SELECT"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 2 {
             return RespValue::error("ERR wrong number of arguments for 'select' command");
@@ -197,10 +201,14 @@ impl CommandHandler for SelectCommand {
 
 // ─── FLUSHALL / FLUSHDB ───────────────────────────────────────────────────────
 
-pub struct FlushAllCommand { pub db: Arc<RedisDatabase> }
+pub struct FlushAllCommand {
+    pub db: Arc<RedisDatabase>,
+}
 
 impl CommandHandler for FlushAllCommand {
-    fn name(&self) -> &str { "FLUSHALL" }
+    fn name(&self) -> &str {
+        "FLUSHALL"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         super::stream_cmds::flush_all();
         super::json_cmds::flush_all();
@@ -217,10 +225,14 @@ impl CommandHandler for FlushAllCommand {
     }
 }
 
-pub struct FlushDbCommand { pub db: Arc<RedisDatabase> }
+pub struct FlushDbCommand {
+    pub db: Arc<RedisDatabase>,
+}
 
 impl CommandHandler for FlushDbCommand {
-    fn name(&self) -> &str { "FLUSHDB" }
+    fn name(&self) -> &str {
+        "FLUSHDB"
+    }
     fn execute(&self, db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         let db = *db_index;
         super::stream_cmds::flush_db(db);
@@ -247,9 +259,12 @@ pub struct InfoCommand {
 }
 
 impl CommandHandler for InfoCommand {
-    fn name(&self) -> &str { "INFO" }
+    fn name(&self) -> &str {
+        "INFO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        let section = args.get(1)
+        let section = args
+            .get(1)
             .and_then(|a| a.as_str())
             .map(|s| s.to_lowercase())
             .unwrap_or_else(|| "default".to_string());
@@ -384,7 +399,11 @@ impl CommandHandler for InfoCommand {
                 lazyfree_pending_objects:0\r\n\
                 lazyfreed_objects:0\r\n",
                 maxmem = self.config.max_memory,
-                maxmem_h = if self.config.max_memory == 0 { "0B".to_string() } else { format!("{}B", self.config.max_memory) },
+                maxmem_h = if self.config.max_memory == 0 {
+                    "0B".to_string()
+                } else {
+                    format!("{}B", self.config.max_memory)
+                },
                 policy = self.config.max_memory_policy.as_str(),
             ));
         }
@@ -575,10 +594,14 @@ impl CommandHandler for InfoCommand {
 
 // ─── DBSIZE ───────────────────────────────────────────────────────────────────
 
-pub struct DbSizeCommand { pub db: Arc<RedisDatabase> }
+pub struct DbSizeCommand {
+    pub db: Arc<RedisDatabase>,
+}
 
 impl CommandHandler for DbSizeCommand {
-    fn name(&self) -> &str { "DBSIZE" }
+    fn name(&self) -> &str {
+        "DBSIZE"
+    }
     fn execute(&self, db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         match self.db.db_info(*db_index) {
             Ok((keys, _)) => RespValue::integer(keys),
@@ -592,49 +615,308 @@ impl CommandHandler for DbSizeCommand {
 pub struct CommandCommand;
 
 impl CommandHandler for CommandCommand {
-    fn name(&self) -> &str { "COMMAND" }
+    fn name(&self) -> &str {
+        "COMMAND"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // Full list of supported commands
         const CMD_NAMES: &[&str] = &[
-            "ACL","AUTH","APPEND","BGREWRITEAOF","BGSAVE","BF.ADD","BF.CARD","BF.EXISTS","BF.INFO",
-            "BF.INSERT","BF.LOADCHUNK","BF.MADD","BF.MEXISTS","BF.RESERVE","BF.SCANDUMP",
-            "BITCOUNT","BITFIELD","BITFIELD_RO","BITOP","BITPOS","BLMOVE","BLMPOP","BLPOP","BRPOP",
-            "BRPOPLPUSH","BZMPOP","BZPOPMAX","BZPOPMIN","CF.ADD","CF.ADDNX","CF.COMPACT","CF.COUNT",
-            "CF.DEL","CF.EXISTS","CF.INFO","CF.INSERT","CF.INSERTNX","CF.LOADCHUNK","CF.MEXISTS",
-            "CF.RESERVE","CF.SCANDUMP","CL.THROTTLE","CLIENT","CLUSTER","CMS.INCRBY","CMS.INFO",
-            "CMS.INITBYDIM","CMS.INITBYPROB","CMS.MERGE","CMS.QUERY","COMMAND","CONFIG","COPY",
-            "DBSIZE","DEBUG","DECR","DECRBY","DEL","DISCARD","DFLY","DUMP","ECHO","EVAL","EVALSHA",
-            "EVALSHA_RO","EVAL_RO","EXEC","EXISTS","EXPIRE","EXPIREAT","EXPIRETIME","FAILOVER",
-            "FCALL","FCALL_RO","FLUSHALL","FLUSHDB","FUNCTION","GEOADD","GEODIST","GEOHASH","GEOPOS",
-            "GEORADIUS","GEORADIUS_RO","GEORADIUSBYMEMBER","GEORADIUSBYMEMBER_RO","GEOSEARCH",
-            "GEOSEARCHSTORE","GET","GETBIT","GETDEL","GETEX","GETRANGE","GETSET","HDEL","HEXISTS",
-            "HGET","HGETALL","HINCRBY","HINCRBYFLOAT","HKEYS","HLEN","HMGET","HMSET","HRANDFIELD",
-            "HSCAN","HSET","HSETNX","HSTRLEN","HVALS","INCR","INCRBY","INCRBYFLOAT","INFO",
-            "JSON.ARRAPPEND","JSON.ARRINDEX","JSON.ARRINSERT","JSON.ARRLEN","JSON.ARRPOP",
-            "JSON.ARRTRIM","JSON.CLEAR","JSON.DEBUG","JSON.DEL","JSON.DUMP","JSON.FORGET",
-            "JSON.GET","JSON.MERGE","JSON.MGET","JSON.MSET","JSON.NUMINCRBY","JSON.NUMMULTBY",
-            "JSON.OBJKEYS","JSON.OBJLEN","JSON.RESP","JSON.SET","JSON.STRAPPEND","JSON.STRLEN",
-            "JSON.TOGGLE","JSON.TYPE","KEYS","LASTSAVE","LATENCY","LCS","LINDEX","LINSERT","LLEN",
-            "LMOVE","LMPOP","LOLWUT","LPOP","LPOS","LPUSH","LPUSHX","LRANGE","LREM","LSET","LTRIM",
-            "MEMORY","MGET","MOVE","MSET","MSETNX","MULTI","OBJECT","PERSIST","PEXPIRE","PEXPIREAT",
-            "PEXPIRETIME","PFADD","PFCOUNT","PFMERGE","PING","PSETEX","PSYNC","PTTL","PUBLISH",
-            "PUBSUB","QUIT","RANDOMKEY","REPLCONF","REPLICAOF","RESET","RESTORE","RPOP","RPOPLPUSH",
-            "RPUSH","RPUSHX","SADD","SAVE","SCAN","SCARD","SCRIPT","SELECT","SET","SETBIT","SETEX",
-            "SETNX","SETRANGE","SINTERCARD","SINTER","SINTERSTORE","SISMEMBER","SLAVEOF","SLOWLOG",
-            "SMEMBERS","SMISMEMBER","SMOVE","SORT","SORT_RO","SPOP","SPUBLISH","SRANDMEMBER","SREM",
-            "SSCAN","SSUBSCRIBE","STRLEN","SUBSTR","SUNION","SUNIONSTORE","SUNSUBSCRIBE","SWAPDB",
-            "TDIGEST.ADD","TDIGEST.BYRANK","TDIGEST.BYREVRANK","TDIGEST.CDF","TDIGEST.CREATE",
-            "TDIGEST.INFO","TDIGEST.MAX","TDIGEST.MERGE","TDIGEST.MIN","TDIGEST.QUANTILE",
-            "TDIGEST.RANK","TDIGEST.RESET","TDIGEST.REVRANK","TDIGEST.TRIMMED_MEAN",
-            "TIME","TOPK.ADD","TOPK.COUNT","TOPK.INCRBY","TOPK.INFO","TOPK.LIST","TOPK.QUERY",
-            "TOPK.RESERVE","TOUCH","TTL","TYPE","UNLINK","UNWATCH","WAIT","WAITAOF","WATCH",
-            "XACK","XADD","XAUTOCLAIM","XCLAIM","XDEL","XGROUP","XINFO","XLEN","XPENDING",
-            "XRANGE","XREAD","XREADGROUP","XREVRANGE","XTRIM","ZADD","ZCARD","ZCOUNT","ZDIFF",
-            "ZDIFFSTORE","ZINCRBY","ZINTER","ZINTERCARD","ZINTERSTORE","ZLEXCOUNT","ZMPOP",
-            "ZMSCORE","ZPOPMAX","ZPOPMIN","ZRANDMEMBER","ZRANGE","ZRANGEBYLEX","ZRANGEBYSCORE",
-            "ZRANGESTORE","ZRANK","ZREM","ZREMRANGEBYLEX","ZREMRANGEBYRANK","ZREMRANGEBYSCORE",
-            "ZREVRANGE","ZREVRANGEBYLEX","ZREVRANGEBYSCORE","ZREVRANK","ZSCAN","ZSCORE",
-            "ZUNION","ZUNIONSTORE",
+            "ACL",
+            "AUTH",
+            "APPEND",
+            "BGREWRITEAOF",
+            "BGSAVE",
+            "BF.ADD",
+            "BF.CARD",
+            "BF.EXISTS",
+            "BF.INFO",
+            "BF.INSERT",
+            "BF.LOADCHUNK",
+            "BF.MADD",
+            "BF.MEXISTS",
+            "BF.RESERVE",
+            "BF.SCANDUMP",
+            "BITCOUNT",
+            "BITFIELD",
+            "BITFIELD_RO",
+            "BITOP",
+            "BITPOS",
+            "BLMOVE",
+            "BLMPOP",
+            "BLPOP",
+            "BRPOP",
+            "BRPOPLPUSH",
+            "BZMPOP",
+            "BZPOPMAX",
+            "BZPOPMIN",
+            "CF.ADD",
+            "CF.ADDNX",
+            "CF.COMPACT",
+            "CF.COUNT",
+            "CF.DEL",
+            "CF.EXISTS",
+            "CF.INFO",
+            "CF.INSERT",
+            "CF.INSERTNX",
+            "CF.LOADCHUNK",
+            "CF.MEXISTS",
+            "CF.RESERVE",
+            "CF.SCANDUMP",
+            "CL.THROTTLE",
+            "CLIENT",
+            "CLUSTER",
+            "CMS.INCRBY",
+            "CMS.INFO",
+            "CMS.INITBYDIM",
+            "CMS.INITBYPROB",
+            "CMS.MERGE",
+            "CMS.QUERY",
+            "COMMAND",
+            "CONFIG",
+            "COPY",
+            "DBSIZE",
+            "DEBUG",
+            "DECR",
+            "DECRBY",
+            "DEL",
+            "DISCARD",
+            "DFLY",
+            "DUMP",
+            "ECHO",
+            "EVAL",
+            "EVALSHA",
+            "EVALSHA_RO",
+            "EVAL_RO",
+            "EXEC",
+            "EXISTS",
+            "EXPIRE",
+            "EXPIREAT",
+            "EXPIRETIME",
+            "FAILOVER",
+            "FCALL",
+            "FCALL_RO",
+            "FLUSHALL",
+            "FLUSHDB",
+            "FUNCTION",
+            "GEOADD",
+            "GEODIST",
+            "GEOHASH",
+            "GEOPOS",
+            "GEORADIUS",
+            "GEORADIUS_RO",
+            "GEORADIUSBYMEMBER",
+            "GEORADIUSBYMEMBER_RO",
+            "GEOSEARCH",
+            "GEOSEARCHSTORE",
+            "GET",
+            "GETBIT",
+            "GETDEL",
+            "GETEX",
+            "GETRANGE",
+            "GETSET",
+            "HDEL",
+            "HEXISTS",
+            "HGET",
+            "HGETALL",
+            "HINCRBY",
+            "HINCRBYFLOAT",
+            "HKEYS",
+            "HLEN",
+            "HMGET",
+            "HMSET",
+            "HRANDFIELD",
+            "HSCAN",
+            "HSET",
+            "HSETNX",
+            "HSTRLEN",
+            "HVALS",
+            "INCR",
+            "INCRBY",
+            "INCRBYFLOAT",
+            "INFO",
+            "JSON.ARRAPPEND",
+            "JSON.ARRINDEX",
+            "JSON.ARRINSERT",
+            "JSON.ARRLEN",
+            "JSON.ARRPOP",
+            "JSON.ARRTRIM",
+            "JSON.CLEAR",
+            "JSON.DEBUG",
+            "JSON.DEL",
+            "JSON.DUMP",
+            "JSON.FORGET",
+            "JSON.GET",
+            "JSON.MERGE",
+            "JSON.MGET",
+            "JSON.MSET",
+            "JSON.NUMINCRBY",
+            "JSON.NUMMULTBY",
+            "JSON.OBJKEYS",
+            "JSON.OBJLEN",
+            "JSON.RESP",
+            "JSON.SET",
+            "JSON.STRAPPEND",
+            "JSON.STRLEN",
+            "JSON.TOGGLE",
+            "JSON.TYPE",
+            "KEYS",
+            "LASTSAVE",
+            "LATENCY",
+            "LCS",
+            "LINDEX",
+            "LINSERT",
+            "LLEN",
+            "LMOVE",
+            "LMPOP",
+            "LOLWUT",
+            "LPOP",
+            "LPOS",
+            "LPUSH",
+            "LPUSHX",
+            "LRANGE",
+            "LREM",
+            "LSET",
+            "LTRIM",
+            "MEMORY",
+            "MGET",
+            "MOVE",
+            "MSET",
+            "MSETNX",
+            "MULTI",
+            "OBJECT",
+            "PERSIST",
+            "PEXPIRE",
+            "PEXPIREAT",
+            "PEXPIRETIME",
+            "PFADD",
+            "PFCOUNT",
+            "PFMERGE",
+            "PING",
+            "PSETEX",
+            "PSYNC",
+            "PTTL",
+            "PUBLISH",
+            "PUBSUB",
+            "QUIT",
+            "RANDOMKEY",
+            "REPLCONF",
+            "REPLICAOF",
+            "RESET",
+            "RESTORE",
+            "RPOP",
+            "RPOPLPUSH",
+            "RPUSH",
+            "RPUSHX",
+            "SADD",
+            "SAVE",
+            "SCAN",
+            "SCARD",
+            "SCRIPT",
+            "SELECT",
+            "SET",
+            "SETBIT",
+            "SETEX",
+            "SETNX",
+            "SETRANGE",
+            "SINTERCARD",
+            "SINTER",
+            "SINTERSTORE",
+            "SISMEMBER",
+            "SLAVEOF",
+            "SLOWLOG",
+            "SMEMBERS",
+            "SMISMEMBER",
+            "SMOVE",
+            "SORT",
+            "SORT_RO",
+            "SPOP",
+            "SPUBLISH",
+            "SRANDMEMBER",
+            "SREM",
+            "SSCAN",
+            "SSUBSCRIBE",
+            "STRLEN",
+            "SUBSTR",
+            "SUNION",
+            "SUNIONSTORE",
+            "SUNSUBSCRIBE",
+            "SWAPDB",
+            "TDIGEST.ADD",
+            "TDIGEST.BYRANK",
+            "TDIGEST.BYREVRANK",
+            "TDIGEST.CDF",
+            "TDIGEST.CREATE",
+            "TDIGEST.INFO",
+            "TDIGEST.MAX",
+            "TDIGEST.MERGE",
+            "TDIGEST.MIN",
+            "TDIGEST.QUANTILE",
+            "TDIGEST.RANK",
+            "TDIGEST.RESET",
+            "TDIGEST.REVRANK",
+            "TDIGEST.TRIMMED_MEAN",
+            "TIME",
+            "TOPK.ADD",
+            "TOPK.COUNT",
+            "TOPK.INCRBY",
+            "TOPK.INFO",
+            "TOPK.LIST",
+            "TOPK.QUERY",
+            "TOPK.RESERVE",
+            "TOUCH",
+            "TTL",
+            "TYPE",
+            "UNLINK",
+            "UNWATCH",
+            "WAIT",
+            "WAITAOF",
+            "WATCH",
+            "XACK",
+            "XADD",
+            "XAUTOCLAIM",
+            "XCLAIM",
+            "XDEL",
+            "XGROUP",
+            "XINFO",
+            "XLEN",
+            "XPENDING",
+            "XRANGE",
+            "XREAD",
+            "XREADGROUP",
+            "XREVRANGE",
+            "XTRIM",
+            "ZADD",
+            "ZCARD",
+            "ZCOUNT",
+            "ZDIFF",
+            "ZDIFFSTORE",
+            "ZINCRBY",
+            "ZINTER",
+            "ZINTERCARD",
+            "ZINTERSTORE",
+            "ZLEXCOUNT",
+            "ZMPOP",
+            "ZMSCORE",
+            "ZPOPMAX",
+            "ZPOPMIN",
+            "ZRANDMEMBER",
+            "ZRANGE",
+            "ZRANGEBYLEX",
+            "ZRANGEBYSCORE",
+            "ZRANGESTORE",
+            "ZRANK",
+            "ZREM",
+            "ZREMRANGEBYLEX",
+            "ZREMRANGEBYRANK",
+            "ZREMRANGEBYSCORE",
+            "ZREVRANGE",
+            "ZREVRANGEBYLEX",
+            "ZREVRANGEBYSCORE",
+            "ZREVRANK",
+            "ZSCAN",
+            "ZSCORE",
+            "ZUNION",
+            "ZUNIONSTORE",
         ];
 
         if args.len() >= 2 {
@@ -644,7 +926,8 @@ impl CommandHandler for CommandCommand {
                 Some("GETKEYS") => {
                     // Basic key extraction: return args[2..] minus option args
                     if args.len() >= 3 {
-                        let keys: Vec<RespValue> = args[3..].iter()
+                        let keys: Vec<RespValue> = args[3..]
+                            .iter()
                             .take(1)
                             .filter_map(|a| a.as_bytes().map(|b| RespValue::bulk_bytes(b.to_vec())))
                             .collect();
@@ -655,12 +938,17 @@ impl CommandHandler for CommandCommand {
                 Some("INFO") => return RespValue::Array(Some(vec![])),
                 Some("LIST") => {
                     // Support FILTERBY PATTERN <glob>
-                    let pattern = if args.len() >= 5 &&
-                        args[2].as_str().map(|s| s.to_uppercase()) == Some("FILTERBY".to_string()) &&
-                        args[3].as_str().map(|s| s.to_uppercase()) == Some("PATTERN".to_string()) {
+                    let pattern = if args.len() >= 5
+                        && args[2].as_str().map(|s| s.to_uppercase())
+                            == Some("FILTERBY".to_string())
+                        && args[3].as_str().map(|s| s.to_uppercase()) == Some("PATTERN".to_string())
+                    {
                         args[4].as_str().map(|s| s.to_uppercase())
-                    } else { None };
-                    let names: Vec<RespValue> = CMD_NAMES.iter()
+                    } else {
+                        None
+                    };
+                    let names: Vec<RespValue> = CMD_NAMES
+                        .iter()
                         .filter(|&&name| {
                             if let Some(ref pat) = pattern {
                                 crate::pubsub::pattern_matches(pat, name)
@@ -695,7 +983,9 @@ impl CommandHandler for CommandCommand {
 pub struct EchoCommand;
 
 impl CommandHandler for EchoCommand {
-    fn name(&self) -> &str { "ECHO" }
+    fn name(&self) -> &str {
+        "ECHO"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 2 {
             return RespValue::error("ERR wrong number of arguments for 'echo' command");
@@ -714,7 +1004,9 @@ pub struct ConfigCommand {
 }
 
 impl CommandHandler for ConfigCommand {
-    fn name(&self) -> &str { "CONFIG" }
+    fn name(&self) -> &str {
+        "CONFIG"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'config' command");
@@ -768,7 +1060,7 @@ impl CommandHandler for ConfigCommand {
 }
 
 fn apply_config_set(cfg: &mut ServerConfig, key: &str, val: &str) {
-    use crate::config::{EvictionPolicy, WalSyncMode, parse_memory_size};
+    use crate::config::{parse_memory_size, EvictionPolicy, WalSyncMode};
     match key {
         "maxmemory" => cfg.max_memory = parse_memory_size(val),
         "maxmemory-policy" => cfg.max_memory_policy = EvictionPolicy::from_str(val),
@@ -837,90 +1129,371 @@ fn get_config_pairs(cfg: &ServerConfig, pattern: &str) -> Vec<(String, String)> 
         ("tcp-backlog".to_string(), cfg.tcp_backlog.to_string()),
         ("tcp-keepalive".to_string(), cfg.tcp_keepalive.to_string()),
         ("timeout".to_string(), cfg.timeout.to_string()),
-        ("protected-mode".to_string(), if cfg.protected_mode { "yes".to_string() } else { "no".to_string() }),
+        (
+            "protected-mode".to_string(),
+            if cfg.protected_mode {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("databases".to_string(), cfg.databases.to_string()),
         ("hz".to_string(), cfg.hz.to_string()),
-        ("dynamic-hz".to_string(), if cfg.dynamic_hz { "yes".to_string() } else { "no".to_string() }),
+        (
+            "dynamic-hz".to_string(),
+            if cfg.dynamic_hz {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("maxmemory".to_string(), cfg.max_memory.to_string()),
-        ("maxmemory-policy".to_string(), cfg.max_memory_policy.as_str().to_string()),
-        ("maxmemory-samples".to_string(), cfg.maxmemory_samples.to_string()),
+        (
+            "maxmemory-policy".to_string(),
+            cfg.max_memory_policy.as_str().to_string(),
+        ),
+        (
+            "maxmemory-samples".to_string(),
+            cfg.maxmemory_samples.to_string(),
+        ),
         ("lfu-log-factor".to_string(), cfg.lfu_log_factor.to_string()),
         ("lfu-decay-time".to_string(), cfg.lfu_decay_time.to_string()),
-        ("activerehashing".to_string(), if cfg.activerehashing { "yes".to_string() } else { "no".to_string() }),
-        ("lazyfree-lazy-eviction".to_string(), if cfg.lazyfree_lazy_eviction { "yes".to_string() } else { "no".to_string() }),
-        ("lazyfree-lazy-expire".to_string(), if cfg.lazyfree_lazy_expire { "yes".to_string() } else { "no".to_string() }),
-        ("lazyfree-lazy-server-del".to_string(), if cfg.lazyfree_lazy_server_del { "yes".to_string() } else { "no".to_string() }),
-        ("lazyfree-lazy-user-del".to_string(), if cfg.lazyfree_lazy_user_del { "yes".to_string() } else { "no".to_string() }),
-        ("lazyfree-lazy-user-flush".to_string(), if cfg.lazyfree_lazy_user_flush { "yes".to_string() } else { "no".to_string() }),
-        ("activedefrag".to_string(), if cfg.activedefrag { "yes".to_string() } else { "no".to_string() }),
-        ("proto-max-bulk-len".to_string(), cfg.proto_max_bulk_len.to_string()),
-        ("client-query-buffer-limit".to_string(), cfg.client_query_buffer_limit.to_string()),
-        ("hash-max-listpack-entries".to_string(), cfg.hash_max_listpack_entries.to_string()),
-        ("hash-max-listpack-value".to_string(), cfg.hash_max_listpack_value.to_string()),
-        ("hash-max-ziplist-entries".to_string(), cfg.hash_max_listpack_entries.to_string()),
-        ("hash-max-ziplist-value".to_string(), cfg.hash_max_listpack_value.to_string()),
-        ("set-max-intset-entries".to_string(), cfg.set_max_intset_entries.to_string()),
-        ("set-max-listpack-entries".to_string(), cfg.set_max_listpack_entries.to_string()),
-        ("set-max-listpack-value".to_string(), cfg.set_max_listpack_value.to_string()),
-        ("zset-max-listpack-entries".to_string(), cfg.zset_max_listpack_entries.to_string()),
-        ("zset-max-listpack-value".to_string(), cfg.zset_max_listpack_value.to_string()),
-        ("zset-max-ziplist-entries".to_string(), cfg.zset_max_listpack_entries.to_string()),
-        ("zset-max-ziplist-value".to_string(), cfg.zset_max_listpack_value.to_string()),
-        ("list-max-listpack-size".to_string(), cfg.list_max_listpack_size.to_string()),
-        ("list-max-ziplist-size".to_string(), cfg.list_max_listpack_size.to_string()),
-        ("list-compress-depth".to_string(), cfg.list_compress_depth.to_string()),
-        ("stream-node-max-bytes".to_string(), cfg.stream_node_max_bytes.to_string()),
-        ("stream-node-max-entries".to_string(), cfg.stream_node_max_entries.to_string()),
+        (
+            "activerehashing".to_string(),
+            if cfg.activerehashing {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "lazyfree-lazy-eviction".to_string(),
+            if cfg.lazyfree_lazy_eviction {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "lazyfree-lazy-expire".to_string(),
+            if cfg.lazyfree_lazy_expire {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "lazyfree-lazy-server-del".to_string(),
+            if cfg.lazyfree_lazy_server_del {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "lazyfree-lazy-user-del".to_string(),
+            if cfg.lazyfree_lazy_user_del {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "lazyfree-lazy-user-flush".to_string(),
+            if cfg.lazyfree_lazy_user_flush {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "activedefrag".to_string(),
+            if cfg.activedefrag {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "proto-max-bulk-len".to_string(),
+            cfg.proto_max_bulk_len.to_string(),
+        ),
+        (
+            "client-query-buffer-limit".to_string(),
+            cfg.client_query_buffer_limit.to_string(),
+        ),
+        (
+            "hash-max-listpack-entries".to_string(),
+            cfg.hash_max_listpack_entries.to_string(),
+        ),
+        (
+            "hash-max-listpack-value".to_string(),
+            cfg.hash_max_listpack_value.to_string(),
+        ),
+        (
+            "hash-max-ziplist-entries".to_string(),
+            cfg.hash_max_listpack_entries.to_string(),
+        ),
+        (
+            "hash-max-ziplist-value".to_string(),
+            cfg.hash_max_listpack_value.to_string(),
+        ),
+        (
+            "set-max-intset-entries".to_string(),
+            cfg.set_max_intset_entries.to_string(),
+        ),
+        (
+            "set-max-listpack-entries".to_string(),
+            cfg.set_max_listpack_entries.to_string(),
+        ),
+        (
+            "set-max-listpack-value".to_string(),
+            cfg.set_max_listpack_value.to_string(),
+        ),
+        (
+            "zset-max-listpack-entries".to_string(),
+            cfg.zset_max_listpack_entries.to_string(),
+        ),
+        (
+            "zset-max-listpack-value".to_string(),
+            cfg.zset_max_listpack_value.to_string(),
+        ),
+        (
+            "zset-max-ziplist-entries".to_string(),
+            cfg.zset_max_listpack_entries.to_string(),
+        ),
+        (
+            "zset-max-ziplist-value".to_string(),
+            cfg.zset_max_listpack_value.to_string(),
+        ),
+        (
+            "list-max-listpack-size".to_string(),
+            cfg.list_max_listpack_size.to_string(),
+        ),
+        (
+            "list-max-ziplist-size".to_string(),
+            cfg.list_max_listpack_size.to_string(),
+        ),
+        (
+            "list-compress-depth".to_string(),
+            cfg.list_compress_depth.to_string(),
+        ),
+        (
+            "stream-node-max-bytes".to_string(),
+            cfg.stream_node_max_bytes.to_string(),
+        ),
+        (
+            "stream-node-max-entries".to_string(),
+            cfg.stream_node_max_entries.to_string(),
+        ),
         ("lua-time-limit".to_string(), cfg.lua_time_limit.to_string()),
-        ("busy-reply-threshold".to_string(), cfg.busy_reply_threshold.to_string()),
-        ("slowlog-log-slower-than".to_string(), cfg.slowlog_log_slower_than.to_string()),
-        ("slowlog-max-len".to_string(), cfg.slowlog_max_len.to_string()),
-        ("latency-tracking".to_string(), if cfg.latency_tracking { "yes".to_string() } else { "no".to_string() }),
-        ("latency-monitor-threshold".to_string(), cfg.latency_monitor_threshold.to_string()),
-        ("notify-keyspace-events".to_string(), cfg.notify_keyspace_events.clone()),
-        ("appendfsync".to_string(), match cfg.wal_sync_mode {
-            WalSyncMode::Always => "always".to_string(),
-            WalSyncMode::Everysec => "everysec".to_string(),
-            WalSyncMode::No => "no".to_string(),
-        }),
+        (
+            "busy-reply-threshold".to_string(),
+            cfg.busy_reply_threshold.to_string(),
+        ),
+        (
+            "slowlog-log-slower-than".to_string(),
+            cfg.slowlog_log_slower_than.to_string(),
+        ),
+        (
+            "slowlog-max-len".to_string(),
+            cfg.slowlog_max_len.to_string(),
+        ),
+        (
+            "latency-tracking".to_string(),
+            if cfg.latency_tracking {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "latency-monitor-threshold".to_string(),
+            cfg.latency_monitor_threshold.to_string(),
+        ),
+        (
+            "notify-keyspace-events".to_string(),
+            cfg.notify_keyspace_events.clone(),
+        ),
+        (
+            "appendfsync".to_string(),
+            match cfg.wal_sync_mode {
+                WalSyncMode::Always => "always".to_string(),
+                WalSyncMode::Everysec => "everysec".to_string(),
+                WalSyncMode::No => "no".to_string(),
+            },
+        ),
         ("requirepass".to_string(), cfg.requirepass.clone()),
         ("aclfile".to_string(), cfg.aclfile.clone()),
         ("acllog-max-len".to_string(), cfg.acllog_max_len.to_string()),
-        ("cluster-enabled".to_string(), if cfg.cluster_enabled { "yes".to_string() } else { "no".to_string() }),
-        ("cluster-config-file".to_string(), cfg.cluster_config_file.clone()),
-        ("cluster-node-timeout".to_string(), cfg.cluster_node_timeout.to_string()),
-        ("repl-backlog-size".to_string(), cfg.repl_backlog_size.to_string()),
-        ("repl-diskless-sync".to_string(), if cfg.repl_diskless_sync { "yes".to_string() } else { "no".to_string() }),
-        ("repl-diskless-sync-delay".to_string(), cfg.repl_diskless_sync_delay.to_string()),
+        (
+            "cluster-enabled".to_string(),
+            if cfg.cluster_enabled {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "cluster-config-file".to_string(),
+            cfg.cluster_config_file.clone(),
+        ),
+        (
+            "cluster-node-timeout".to_string(),
+            cfg.cluster_node_timeout.to_string(),
+        ),
+        (
+            "repl-backlog-size".to_string(),
+            cfg.repl_backlog_size.to_string(),
+        ),
+        (
+            "repl-diskless-sync".to_string(),
+            if cfg.repl_diskless_sync {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "repl-diskless-sync-delay".to_string(),
+            cfg.repl_diskless_sync_delay.to_string(),
+        ),
         ("repl-timeout".to_string(), cfg.repl_timeout.to_string()),
         ("io-threads".to_string(), cfg.io_threads.to_string()),
-        ("io-threads-do-reads".to_string(), if cfg.io_threads_do_reads { "yes".to_string() } else { "no".to_string() }),
-        ("rdbcompression".to_string(), if cfg.rdb_compression { "yes".to_string() } else { "no".to_string() }),
-        ("rdbchecksum".to_string(), if cfg.rdb_checksum { "yes".to_string() } else { "no".to_string() }),
+        (
+            "io-threads-do-reads".to_string(),
+            if cfg.io_threads_do_reads {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "rdbcompression".to_string(),
+            if cfg.rdb_compression {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "rdbchecksum".to_string(),
+            if cfg.rdb_checksum {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("dbfilename".to_string(), cfg.dbfilename.clone()),
         ("dir".to_string(), cfg.dir.clone()),
-        ("tracking-table-max-keys".to_string(), cfg.tracking_table_max_keys.to_string()),
-        ("jemalloc-bg-thread".to_string(), if cfg.jemalloc_bg_thread { "yes".to_string() } else { "no".to_string() }),
-        ("active-expire-enabled".to_string(), if cfg.active_expire_enabled { "yes".to_string() } else { "no".to_string() }),
+        (
+            "tracking-table-max-keys".to_string(),
+            cfg.tracking_table_max_keys.to_string(),
+        ),
+        (
+            "jemalloc-bg-thread".to_string(),
+            if cfg.jemalloc_bg_thread {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "active-expire-enabled".to_string(),
+            if cfg.active_expire_enabled {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("loglevel".to_string(), "notice".to_string()),
         ("logfile".to_string(), cfg.log_file.clone()),
         ("save".to_string(), "3600 1 300 100 60 10000".to_string()),
-        ("aof-use-rdb-preamble".to_string(), if cfg.aof_use_rdb_preamble { "yes".to_string() } else { "no".to_string() }),
-        ("replica-lazy-flush".to_string(), if cfg.replica_lazy_flush { "yes".to_string() } else { "no".to_string() }),
-        ("replica-serve-stale-data".to_string(), if cfg.replica_serve_stale_data { "yes".to_string() } else { "no".to_string() }),
-        ("replica-read-only".to_string(), if cfg.replica_read_only { "yes".to_string() } else { "no".to_string() }),
-        ("memtable-size-mb".to_string(), cfg.memtable_size_mb.to_string()),
-        ("enable-debug-command".to_string(), if cfg.enable_debug_command { "yes".to_string() } else { "no".to_string() }),
-        ("close-on-oom".to_string(), if cfg.close_on_oom { "yes".to_string() } else { "no".to_string() }),
-        ("crash-log-enabled".to_string(), if cfg.crash_log_enabled { "yes".to_string() } else { "no".to_string() }),
-        ("syslog-enabled".to_string(), if cfg.syslog_enabled { "yes".to_string() } else { "no".to_string() }),
+        (
+            "aof-use-rdb-preamble".to_string(),
+            if cfg.aof_use_rdb_preamble {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "replica-lazy-flush".to_string(),
+            if cfg.replica_lazy_flush {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "replica-serve-stale-data".to_string(),
+            if cfg.replica_serve_stale_data {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "replica-read-only".to_string(),
+            if cfg.replica_read_only {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "memtable-size-mb".to_string(),
+            cfg.memtable_size_mb.to_string(),
+        ),
+        (
+            "enable-debug-command".to_string(),
+            if cfg.enable_debug_command {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "close-on-oom".to_string(),
+            if cfg.close_on_oom {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "crash-log-enabled".to_string(),
+            if cfg.crash_log_enabled {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
+        (
+            "syslog-enabled".to_string(),
+            if cfg.syslog_enabled {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("syslog-ident".to_string(), cfg.syslog_ident.clone()),
         ("tcp-backlog".to_string(), cfg.tcp_backlog.to_string()),
-        ("enable-protected-configs".to_string(), if cfg.enable_protected_configs { "yes".to_string() } else { "no".to_string() }),
+        (
+            "enable-protected-configs".to_string(),
+            if cfg.enable_protected_configs {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("bind-source-addr".to_string(), "".to_string()),
         ("oom-score-adj".to_string(), "no".to_string()),
         ("oom-score-adj-values".to_string(), "0 200 800".to_string()),
-        ("acl-pubsub-default".to_string(), "resetchannels".to_string()),
+        (
+            "acl-pubsub-default".to_string(),
+            "resetchannels".to_string(),
+        ),
         ("socket-mark-id".to_string(), "0".to_string()),
         ("tls-port".to_string(), "0".to_string()),
         ("tls-replication".to_string(), "no".to_string()),
@@ -929,35 +1502,83 @@ fn get_config_pairs(cfg: &ServerConfig, pattern: &str) -> Vec<(String, String)> 
         ("repl-min-replicas-to-write".to_string(), "0".to_string()),
         ("repl-min-slaves-max-lag".to_string(), "10".to_string()),
         ("repl-min-replicas-max-lag".to_string(), "10".to_string()),
-        ("repl-diskless-sync-max-replicas".to_string(), "0".to_string()),
+        (
+            "repl-diskless-sync-max-replicas".to_string(),
+            "0".to_string(),
+        ),
         ("no-appendfsync-on-rewrite".to_string(), "no".to_string()),
         ("auto-aof-rewrite-percentage".to_string(), "100".to_string()),
-        ("auto-aof-rewrite-min-size".to_string(), "67108864".to_string()),
-        ("aof-rewrite-incremental-fsync".to_string(), "yes".to_string()),
-        ("rdb-save-incremental-fsync".to_string(), if cfg.rdb_save_incremental_fsync { "yes".to_string() } else { "no".to_string() }),
+        (
+            "auto-aof-rewrite-min-size".to_string(),
+            "67108864".to_string(),
+        ),
+        (
+            "aof-rewrite-incremental-fsync".to_string(),
+            "yes".to_string(),
+        ),
+        (
+            "rdb-save-incremental-fsync".to_string(),
+            if cfg.rdb_save_incremental_fsync {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("crash-memlog-enabled".to_string(), "yes".to_string()),
         ("use-exit-on-panic".to_string(), "no".to_string()),
         ("disable-thp".to_string(), "no".to_string()),
-        ("cluster-require-full-coverage".to_string(), if cfg.cluster_require_full_coverage { "yes".to_string() } else { "no".to_string() }),
+        (
+            "cluster-require-full-coverage".to_string(),
+            if cfg.cluster_require_full_coverage {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("cluster-slave-no-failover".to_string(), "no".to_string()),
-        ("cluster-allow-reads-when-down".to_string(), "no".to_string()),
-        ("cluster-allow-pubsubshard-when-down".to_string(), "yes".to_string()),
+        (
+            "cluster-allow-reads-when-down".to_string(),
+            "no".to_string(),
+        ),
+        (
+            "cluster-allow-pubsubshard-when-down".to_string(),
+            "yes".to_string(),
+        ),
         ("cluster-migration-barrier".to_string(), "1".to_string()),
         ("cluster-announce-ip".to_string(), "".to_string()),
         ("cluster-announce-port".to_string(), "0".to_string()),
         ("cluster-announce-bus-port".to_string(), "0".to_string()),
         ("cluster-link-sendbuf-limit".to_string(), "0".to_string()),
         ("cluster-announce-hostname".to_string(), "".to_string()),
-        ("cluster-announce-human-nodename".to_string(), "".to_string()),
-        ("cluster-slave-validity-factor".to_string(), "10".to_string()),
+        (
+            "cluster-announce-human-nodename".to_string(),
+            "".to_string(),
+        ),
+        (
+            "cluster-slave-validity-factor".to_string(),
+            "10".to_string(),
+        ),
         ("slave-lazy-flush".to_string(), "no".to_string()),
         ("slave-serve-stale-data".to_string(), "yes".to_string()),
         ("slave-read-only".to_string(), "yes".to_string()),
-        ("active-defrag-ignore-bytes".to_string(), cfg.active_defrag_ignore_bytes.to_string()),
-        ("active-defrag-enabled".to_string(), if cfg.activedefrag { "yes".to_string() } else { "no".to_string() }),
+        (
+            "active-defrag-ignore-bytes".to_string(),
+            cfg.active_defrag_ignore_bytes.to_string(),
+        ),
+        (
+            "active-defrag-enabled".to_string(),
+            if cfg.activedefrag {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        ),
         ("active-defrag-cycle-min".to_string(), "1".to_string()),
         ("active-defrag-cycle-max".to_string(), "25".to_string()),
-        ("active-defrag-max-scan-fields".to_string(), "1000".to_string()),
+        (
+            "active-defrag-max-scan-fields".to_string(),
+            "1000".to_string(),
+        ),
     ];
 
     // Filter by pattern (glob match)
@@ -967,7 +1588,9 @@ fn get_config_pairs(cfg: &ServerConfig, pattern: &str) -> Vec<(String, String)> 
 }
 
 fn glob_match(pattern: &str, s: &str) -> bool {
-    if pattern == "*" { return true; }
+    if pattern == "*" {
+        return true;
+    }
     let pat: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = s.chars().collect();
     glob_match_chars(&pat, &s)
@@ -978,8 +1601,7 @@ fn glob_match_chars(pat: &[char], s: &[char]) -> bool {
         (None, None) => true,
         (Some(&'*'), _) => {
             // Try matching zero chars, then one char, etc.
-            glob_match_chars(&pat[1..], s) ||
-            (!s.is_empty() && glob_match_chars(pat, &s[1..]))
+            glob_match_chars(&pat[1..], s) || (!s.is_empty() && glob_match_chars(pat, &s[1..]))
         }
         (Some(&'?'), Some(_)) => glob_match_chars(&pat[1..], &s[1..]),
         (Some(p), Some(c)) if p == c => glob_match_chars(&pat[1..], &s[1..]),
@@ -995,7 +1617,9 @@ pub struct AuthCommand {
 }
 
 impl CommandHandler for AuthCommand {
-    fn name(&self) -> &str { "AUTH" }
+    fn name(&self) -> &str {
+        "AUTH"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         // Real AUTH handling is done in server.rs; this is the fallback.
         RespValue::ok()
@@ -1007,7 +1631,9 @@ impl CommandHandler for AuthCommand {
 pub struct ClientCommand;
 
 impl CommandHandler for ClientCommand {
-    fn name(&self) -> &str { "CLIENT" }
+    fn name(&self) -> &str {
+        "CLIENT"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         // Real CLIENT handling is done in server.rs; this is the fallback.
         RespValue::ok()
@@ -1019,7 +1645,9 @@ impl CommandHandler for ClientCommand {
 pub struct QuitCommand;
 
 impl CommandHandler for QuitCommand {
-    fn name(&self) -> &str { "QUIT" }
+    fn name(&self) -> &str {
+        "QUIT"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -1030,14 +1658,20 @@ impl CommandHandler for QuitCommand {
 pub struct DebugCommand;
 
 impl CommandHandler for DebugCommand {
-    fn name(&self) -> &str { "DEBUG" }
+    fn name(&self) -> &str {
+        "DEBUG"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::ok();
         }
         match args[1].as_str().map(|s| s.to_uppercase()).as_deref() {
             Some("SLEEP") => {
-                if let Some(secs) = args.get(2).and_then(|a| a.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(secs) = args
+                    .get(2)
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     let ms = (secs * 1000.0) as u64;
                     std::thread::sleep(std::time::Duration::from_millis(ms.min(5000)));
                 }
@@ -1082,7 +1716,9 @@ pub struct SlowlogCommand {
 }
 
 impl CommandHandler for SlowlogCommand {
-    fn name(&self) -> &str { "SLOWLOG" }
+    fn name(&self) -> &str {
+        "SLOWLOG"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'slowlog' command");
@@ -1132,7 +1768,9 @@ pub struct LatencyCommand {
 }
 
 impl CommandHandler for LatencyCommand {
-    fn name(&self) -> &str { "LATENCY" }
+    fn name(&self) -> &str {
+        "LATENCY"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'latency' command");
@@ -1141,39 +1779,49 @@ impl CommandHandler for LatencyCommand {
             Some("HISTORY") => {
                 let event = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
                 let history = self.store.history(event);
-                RespValue::Array(Some(history.into_iter().map(|(ts, lat)| {
-                    RespValue::Array(Some(vec![
-                        RespValue::integer(ts as i64),
-                        RespValue::integer(lat as i64),
-                    ]))
-                }).collect()))
+                RespValue::Array(Some(
+                    history
+                        .into_iter()
+                        .map(|(ts, lat)| {
+                            RespValue::Array(Some(vec![
+                                RespValue::integer(ts as i64),
+                                RespValue::integer(lat as i64),
+                            ]))
+                        })
+                        .collect(),
+                ))
             }
             Some("LATEST") => {
                 let latest = self.store.latest();
-                RespValue::Array(Some(latest.into_iter().map(|(name, ts, lat)| {
-                    RespValue::Array(Some(vec![
-                        RespValue::bulk_str(&name),
-                        RespValue::integer(ts as i64),
-                        RespValue::integer(lat as i64),
-                    ]))
-                }).collect()))
+                RespValue::Array(Some(
+                    latest
+                        .into_iter()
+                        .map(|(name, ts, lat)| {
+                            RespValue::Array(Some(vec![
+                                RespValue::bulk_str(&name),
+                                RespValue::integer(ts as i64),
+                                RespValue::integer(lat as i64),
+                            ]))
+                        })
+                        .collect(),
+                ))
             }
             Some("RESET") => {
                 let event = args.get(2).and_then(|a| a.as_str());
                 self.store.reset(event);
                 RespValue::integer(1)
             }
-            Some("GRAPH") => {
-                RespValue::bulk_str("No data.")
-            }
-            Some("HELP") => {
-                RespValue::Array(Some(vec![
-                    RespValue::bulk_str("LATENCY <subcommand> [<arg> [value] [opt] ...]. subcommands are:"),
-                    RespValue::bulk_str("HISTORY <event> -- Return latency history of <event>."),
-                    RespValue::bulk_str("LATEST -- Return the latest latency samples for all events."),
-                    RespValue::bulk_str("RESET [<event> ...] -- Reset latency data of one or more events."),
-                ]))
-            }
+            Some("GRAPH") => RespValue::bulk_str("No data."),
+            Some("HELP") => RespValue::Array(Some(vec![
+                RespValue::bulk_str(
+                    "LATENCY <subcommand> [<arg> [value] [opt] ...]. subcommands are:",
+                ),
+                RespValue::bulk_str("HISTORY <event> -- Return latency history of <event>."),
+                RespValue::bulk_str("LATEST -- Return the latest latency samples for all events."),
+                RespValue::bulk_str(
+                    "RESET [<event> ...] -- Reset latency data of one or more events.",
+                ),
+            ])),
             _ => RespValue::empty_array(),
         }
     }
@@ -1186,7 +1834,9 @@ pub struct MemoryCommand {
 }
 
 impl CommandHandler for MemoryCommand {
-    fn name(&self) -> &str { "MEMORY" }
+    fn name(&self) -> &str {
+        "MEMORY"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'memory' command");
@@ -1285,13 +1935,19 @@ impl CommandHandler for MemoryCommand {
 
 pub struct SaveCommand;
 impl CommandHandler for SaveCommand {
-    fn name(&self) -> &str { "SAVE" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "SAVE"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct BgSaveCommand;
 impl CommandHandler for BgSaveCommand {
-    fn name(&self) -> &str { "BGSAVE" }
+    fn name(&self) -> &str {
+        "BGSAVE"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::simple("Background saving started")
     }
@@ -1299,7 +1955,9 @@ impl CommandHandler for BgSaveCommand {
 
 pub struct BgRewriteAofCommand;
 impl CommandHandler for BgRewriteAofCommand {
-    fn name(&self) -> &str { "BGREWRITEAOF" }
+    fn name(&self) -> &str {
+        "BGREWRITEAOF"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::simple("Background append only file rewriting started")
     }
@@ -1317,7 +1975,9 @@ lazy_static::lazy_static! {
 
 pub struct LastSaveCommand;
 impl CommandHandler for LastSaveCommand {
-    fn name(&self) -> &str { "LASTSAVE" }
+    fn name(&self) -> &str {
+        "LASTSAVE"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::integer(LAST_SAVE_TIME.load(Ordering::Relaxed) as i64)
     }
@@ -1327,7 +1987,9 @@ impl CommandHandler for LastSaveCommand {
 
 pub struct TimeCommand;
 impl CommandHandler for TimeCommand {
-    fn name(&self) -> &str { "TIME" }
+    fn name(&self) -> &str {
+        "TIME"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1345,13 +2007,19 @@ impl CommandHandler for TimeCommand {
 
 pub struct MultiCommand;
 impl CommandHandler for MultiCommand {
-    fn name(&self) -> &str { "MULTI" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "MULTI"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct ExecCommand;
 impl CommandHandler for ExecCommand {
-    fn name(&self) -> &str { "EXEC" }
+    fn name(&self) -> &str {
+        "EXEC"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![]))
     }
@@ -1359,28 +2027,44 @@ impl CommandHandler for ExecCommand {
 
 pub struct DiscardCommand;
 impl CommandHandler for DiscardCommand {
-    fn name(&self) -> &str { "DISCARD" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "DISCARD"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct WatchCommand;
 impl CommandHandler for WatchCommand {
-    fn name(&self) -> &str { "WATCH" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "WATCH"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 pub struct UnwatchCommand;
 impl CommandHandler for UnwatchCommand {
-    fn name(&self) -> &str { "UNWATCH" }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue { RespValue::ok() }
+    fn name(&self) -> &str {
+        "UNWATCH"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        RespValue::ok()
+    }
 }
 
 // ─── PUBLISH / PUBSUB ─────────────────────────────────────────────────────────
 
-pub struct PublishCommand { pub hub: Arc<PubSubHub> }
+pub struct PublishCommand {
+    pub hub: Arc<PubSubHub>,
+}
 
 impl CommandHandler for PublishCommand {
-    fn name(&self) -> &str { "PUBLISH" }
+    fn name(&self) -> &str {
+        "PUBLISH"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 3 {
             return RespValue::error("ERR wrong number of arguments for 'publish' command");
@@ -1397,10 +2081,14 @@ impl CommandHandler for PublishCommand {
     }
 }
 
-pub struct PubSubCommand { pub hub: Arc<PubSubHub> }
+pub struct PubSubCommand {
+    pub hub: Arc<PubSubHub>,
+}
 
 impl CommandHandler for PubSubCommand {
-    fn name(&self) -> &str { "PUBSUB" }
+    fn name(&self) -> &str {
+        "PUBSUB"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'pubsub' command");
@@ -1454,10 +2142,14 @@ impl CommandHandler for PubSubCommand {
 
 // ─── SWAPDB ───────────────────────────────────────────────────────────────────
 
-pub struct SwapDbCommand { pub db: Arc<RedisDatabase> }
+pub struct SwapDbCommand {
+    pub db: Arc<RedisDatabase>,
+}
 
 impl CommandHandler for SwapDbCommand {
-    fn name(&self) -> &str { "SWAPDB" }
+    fn name(&self) -> &str {
+        "SWAPDB"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 3 {
             return RespValue::error("ERR wrong number of arguments for 'swapdb' command");
@@ -1481,7 +2173,9 @@ impl CommandHandler for SwapDbCommand {
 
 pub struct WaitCommand;
 impl CommandHandler for WaitCommand {
-    fn name(&self) -> &str { "WAIT" }
+    fn name(&self) -> &str {
+        "WAIT"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::integer(0)
     }
@@ -1491,7 +2185,9 @@ impl CommandHandler for WaitCommand {
 
 pub struct WaitAofCommand;
 impl CommandHandler for WaitAofCommand {
-    fn name(&self) -> &str { "WAITAOF" }
+    fn name(&self) -> &str {
+        "WAITAOF"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::Array(Some(vec![RespValue::integer(0), RespValue::integer(0)]))
     }
@@ -1505,12 +2201,17 @@ pub struct ObjectCommand {
 }
 
 impl CommandHandler for ObjectCommand {
-    fn name(&self) -> &str { "OBJECT" }
+    fn name(&self) -> &str {
+        "OBJECT"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'object' command");
         }
-        let sub = args[1].as_str().map(|s| s.to_uppercase()).unwrap_or_default();
+        let sub = args[1]
+            .as_str()
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
         match sub.as_str() {
             "ENCODING" => {
                 if args.len() < 3 {
@@ -1680,7 +2381,9 @@ impl CommandHandler for ObjectCommand {
 
 pub struct ResetCommand;
 impl CommandHandler for ResetCommand {
-    fn name(&self) -> &str { "RESET" }
+    fn name(&self) -> &str {
+        "RESET"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::simple("RESET")
     }
@@ -1690,7 +2393,9 @@ impl CommandHandler for ResetCommand {
 
 pub struct LolwutCommand;
 impl CommandHandler for LolwutCommand {
-    fn name(&self) -> &str { "LOLWUT" }
+    fn name(&self) -> &str {
+        "LOLWUT"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         let art = "\
             \r\n\
@@ -1711,7 +2416,7 @@ impl CommandHandler for LolwutCommand {
 
 // ─── SCRIPT ───────────────────────────────────────────────────────────────────
 
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 lazy_static::lazy_static! {
     static ref SCRIPT_STORE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
@@ -1727,7 +2432,9 @@ fn sha1_hex(data: &[u8]) -> String {
 pub struct ScriptCommand;
 
 impl CommandHandler for ScriptCommand {
-    fn name(&self) -> &str { "SCRIPT" }
+    fn name(&self) -> &str {
+        "SCRIPT"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'script' command");
@@ -1776,7 +2483,9 @@ pub struct EvalCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for EvalCommand {
-    fn name(&self) -> &str { "EVAL" }
+    fn name(&self) -> &str {
+        "EVAL"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // EVAL script numkeys [key [key ...]] [arg [arg ...]]
         if args.len() < 3 {
@@ -1803,7 +2512,9 @@ pub struct EvalshaCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for EvalshaCommand {
-    fn name(&self) -> &str { "EVALSHA" }
+    fn name(&self) -> &str {
+        "EVALSHA"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'evalsha' command");
@@ -1833,7 +2544,9 @@ pub struct EvalRoCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for EvalRoCommand {
-    fn name(&self) -> &str { "EVAL_RO" }
+    fn name(&self) -> &str {
+        "EVAL_RO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // Same as EVAL — we don't enforce read-only at this layer
         if args.len() < 3 {
@@ -1860,7 +2573,9 @@ pub struct EvalshaRoCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for EvalshaRoCommand {
-    fn name(&self) -> &str { "EVALSHA_RO" }
+    fn name(&self) -> &str {
+        "EVALSHA_RO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 3 {
             return RespValue::error("ERR wrong number of arguments for 'evalsha_ro' command");
@@ -1930,7 +2645,9 @@ fn extract_function_names(code: &str) -> Vec<String> {
 pub struct FunctionCommand;
 
 impl CommandHandler for FunctionCommand {
-    fn name(&self) -> &str { "FUNCTION" }
+    fn name(&self) -> &str {
+        "FUNCTION"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'function' command");
@@ -2045,7 +2762,9 @@ pub struct FcallCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for FcallCommand {
-    fn name(&self) -> &str { "FCALL" }
+    fn name(&self) -> &str {
+        "FCALL"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         // FCALL function numkeys [key [key ...]] [arg [arg ...]]
         if args.len() < 3 {
@@ -2065,7 +2784,8 @@ impl CommandHandler for FcallCommand {
         // Find library code containing this function
         let library_code = {
             let store = FUNCTION_STORE.lock();
-            store.values()
+            store
+                .values()
                 .find(|code| code.contains(&func_name))
                 .cloned()
         };
@@ -2076,7 +2796,8 @@ impl CommandHandler for FcallCommand {
         let keys = &args[3..3 + numkeys];
         let argv = &args[3 + numkeys..];
         // Strip #!lua shebang line (not valid Lua syntax)
-        let clean_code: String = library_code.lines()
+        let clean_code: String = library_code
+            .lines()
             .filter(|l| !l.trim_start().starts_with("#!"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2110,9 +2831,14 @@ pub struct FcallRoCommand {
     pub registry: Arc<CommandRegistry>,
 }
 impl CommandHandler for FcallRoCommand {
-    fn name(&self) -> &str { "FCALL_RO" }
+    fn name(&self) -> &str {
+        "FCALL_RO"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        FcallCommand { registry: self.registry.clone() }.execute(db_index, args)
+        FcallCommand {
+            registry: self.registry.clone(),
+        }
+        .execute(db_index, args)
     }
 }
 
@@ -2124,7 +2850,9 @@ pub struct AclCommand {
 }
 
 impl CommandHandler for AclCommand {
-    fn name(&self) -> &str { "ACL" }
+    fn name(&self) -> &str {
+        "ACL"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
             return RespValue::error("ERR wrong number of arguments for 'acl' command");
@@ -2280,9 +3008,13 @@ impl CommandHandler for AclCommand {
 
 // ─── SHARDED PUBSUB ───────────────────────────────────────────────────────────
 
-pub struct SpublishCommand { pub hub: Arc<PubSubHub> }
+pub struct SpublishCommand {
+    pub hub: Arc<PubSubHub>,
+}
 impl CommandHandler for SpublishCommand {
-    fn name(&self) -> &str { "SPUBLISH" }
+    fn name(&self) -> &str {
+        "SPUBLISH"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() != 3 {
             return RespValue::error("ERR wrong number of arguments for 'spublish' command");
@@ -2301,7 +3033,9 @@ impl CommandHandler for SpublishCommand {
 
 pub struct SsubscribeCommand;
 impl CommandHandler for SsubscribeCommand {
-    fn name(&self) -> &str { "SSUBSCRIBE" }
+    fn name(&self) -> &str {
+        "SSUBSCRIBE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         let mut result = Vec::new();
         for (i, arg) in args[1..].iter().enumerate() {
@@ -2313,13 +3047,19 @@ impl CommandHandler for SsubscribeCommand {
                 ])));
             }
         }
-        if result.len() == 1 { result.remove(0) } else { RespValue::Array(Some(result)) }
+        if result.len() == 1 {
+            result.remove(0)
+        } else {
+            RespValue::Array(Some(result))
+        }
     }
 }
 
 pub struct SunsubscribeCommand;
 impl CommandHandler for SunsubscribeCommand {
-    fn name(&self) -> &str { "SUNSUBSCRIBE" }
+    fn name(&self) -> &str {
+        "SUNSUBSCRIBE"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() <= 1 {
             return RespValue::Array(Some(vec![
@@ -2338,7 +3078,11 @@ impl CommandHandler for SunsubscribeCommand {
                 ])));
             }
         }
-        if result.len() == 1 { result.remove(0) } else { RespValue::Array(Some(result)) }
+        if result.len() == 1 {
+            result.remove(0)
+        } else {
+            RespValue::Array(Some(result))
+        }
     }
 }
 
@@ -2346,7 +3090,9 @@ impl CommandHandler for SunsubscribeCommand {
 
 pub struct ReplicaofCommand;
 impl CommandHandler for ReplicaofCommand {
-    fn name(&self) -> &str { "REPLICAOF" }
+    fn name(&self) -> &str {
+        "REPLICAOF"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
         if args.len() >= 3 {
             let host = args[1].as_str().unwrap_or("").to_uppercase();
@@ -2360,7 +3106,9 @@ impl CommandHandler for ReplicaofCommand {
 
 pub struct SlaveofCommand;
 impl CommandHandler for SlaveofCommand {
-    fn name(&self) -> &str { "SLAVEOF" }
+    fn name(&self) -> &str {
+        "SLAVEOF"
+    }
     fn execute(&self, db_index: &mut usize, args: &[RespValue]) -> RespValue {
         ReplicaofCommand.execute(db_index, args)
     }
@@ -2368,7 +3116,9 @@ impl CommandHandler for SlaveofCommand {
 
 pub struct FailoverCommand;
 impl CommandHandler for FailoverCommand {
-    fn name(&self) -> &str { "FAILOVER" }
+    fn name(&self) -> &str {
+        "FAILOVER"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::error("ERR Failover not supported")
     }
@@ -2376,7 +3126,9 @@ impl CommandHandler for FailoverCommand {
 
 pub struct PsyncCommand;
 impl CommandHandler for PsyncCommand {
-    fn name(&self) -> &str { "PSYNC" }
+    fn name(&self) -> &str {
+        "PSYNC"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::error("ERR Replication not supported")
     }
@@ -2384,7 +3136,9 @@ impl CommandHandler for PsyncCommand {
 
 pub struct ReplconfCommand;
 impl CommandHandler for ReplconfCommand {
-    fn name(&self) -> &str { "REPLCONF" }
+    fn name(&self) -> &str {
+        "REPLCONF"
+    }
     fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
         RespValue::ok()
     }
@@ -2394,13 +3148,17 @@ impl CommandHandler for ReplconfCommand {
 
 pub struct ClusterCommand;
 impl CommandHandler for ClusterCommand {
-    fn name(&self) -> &str { "CLUSTER" }
+    fn name(&self) -> &str {
+        "CLUSTER"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        let sub = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_uppercase());
+        let sub = args
+            .get(1)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase());
         match sub.as_deref() {
-            Some("INFO") => {
-                RespValue::bulk_str(
-                    "cluster_enabled:0\r\n\
+            Some("INFO") => RespValue::bulk_str(
+                "cluster_enabled:0\r\n\
                      cluster_state:ok\r\n\
                      cluster_slots_assigned:0\r\n\
                      cluster_slots_ok:0\r\n\
@@ -2412,9 +3170,8 @@ impl CommandHandler for ClusterCommand {
                      cluster_my_epoch:0\r\n\
                      cluster_stats_messages_sent:0\r\n\
                      cluster_stats_messages_received:0\r\n\
-                     total_cluster_links_buffer_limit_exceeded:0\r\n"
-                )
-            }
+                     total_cluster_links_buffer_limit_exceeded:0\r\n",
+            ),
             Some("MYID") => RespValue::bulk_str("0000000000000000000000000000000000000000"),
             Some("NODES") => RespValue::bulk_str(""),
             Some("SLOTS") => RespValue::Array(Some(vec![])),
@@ -2429,7 +3186,9 @@ impl CommandHandler for ClusterCommand {
             Some("GETKEYSINSLOT") => RespValue::Array(Some(vec![])),
             Some("RESET") => RespValue::ok(),
             Some("FLUSHSLOTS") => RespValue::ok(),
-            Some("ADDSLOTS") | Some("ADDSLOTSRANGE") | Some("DELSLOTS") | Some("DELSLOTSRANGE") => RespValue::ok(),
+            Some("ADDSLOTS") | Some("ADDSLOTSRANGE") | Some("DELSLOTS") | Some("DELSLOTSRANGE") => {
+                RespValue::ok()
+            }
             Some("MEET") | Some("FORGET") | Some("REPLICATE") | Some("FAILOVER") => RespValue::ok(),
             Some("SETSLOT") => RespValue::ok(),
             Some("LINKS") => RespValue::Array(Some(vec![])),
@@ -2457,18 +3216,21 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
 
 pub struct DflyCommand;
 impl CommandHandler for DflyCommand {
-    fn name(&self) -> &str { "DFLY" }
+    fn name(&self) -> &str {
+        "DFLY"
+    }
     fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
-        let sub = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_uppercase());
+        let sub = args
+            .get(1)
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_uppercase());
         match sub.as_deref() {
-            Some("GETRESOURCESTATS") => {
-                RespValue::Array(Some(vec![
-                    RespValue::bulk_str("used_memory"),
-                    RespValue::integer(0),
-                    RespValue::bulk_str("used_memory_peak"),
-                    RespValue::integer(0),
-                ]))
-            }
+            Some("GETRESOURCESTATS") => RespValue::Array(Some(vec![
+                RespValue::bulk_str("used_memory"),
+                RespValue::integer(0),
+                RespValue::bulk_str("used_memory_peak"),
+                RespValue::integer(0),
+            ])),
             Some("GETVER") => RespValue::bulk_str("v1.0.0-ssd"),
             Some("SHARD") | Some("SHARD_COUNT") => RespValue::integer(1),
             Some("DECOMMIT") => RespValue::ok(),

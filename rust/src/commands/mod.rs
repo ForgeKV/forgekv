@@ -1,18 +1,18 @@
 pub mod bf_cmds;
 pub mod cf_cmds;
 pub mod geo_cmds;
-pub mod json_cmds;
-pub mod probabilistic_cmds;
-pub mod search_cmds;
-pub mod stream_cmds;
-pub mod tdigest_cmds;
 pub mod hash_cmds;
 pub mod hll_cmds;
+pub mod json_cmds;
 pub mod key_cmds;
 pub mod list_cmds;
+pub mod probabilistic_cmds;
+pub mod search_cmds;
 pub mod server_cmds;
 pub mod set_cmds;
+pub mod stream_cmds;
 pub mod string_cmds;
+pub mod tdigest_cmds;
 pub mod zset_cmds;
 
 use std::collections::HashMap;

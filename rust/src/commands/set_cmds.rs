@@ -85,7 +85,8 @@ impl CommandHandler for SMembersCommand {
         };
         match self.db.smembers(*db_index, key) {
             Ok(members) => {
-                let items: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                let items: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -200,7 +201,8 @@ impl CommandHandler for SDiffCommand {
         let result = sdiff_sets(self.db.as_ref(), *db_index, &keys);
         match result {
             Ok(members) => {
-                let items: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                let items: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -260,7 +262,8 @@ impl CommandHandler for SInterCommand {
         let keys: Vec<&[u8]> = args[1..].iter().filter_map(|a| a.as_bytes()).collect();
         match sinter_sets(self.db.as_ref(), *db_index, &keys) {
             Ok(members) => {
-                let items: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                let items: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -319,7 +322,8 @@ impl CommandHandler for SUnionCommand {
         let keys: Vec<&[u8]> = args[1..].iter().filter_map(|a| a.as_bytes()).collect();
         match sunion_sets(self.db.as_ref(), *db_index, &keys) {
             Ok(members) => {
-                let items: Vec<RespValue> = members.into_iter().map(RespValue::bulk_bytes).collect();
+                let items: Vec<RespValue> =
+                    members.into_iter().map(RespValue::bulk_bytes).collect();
                 RespValue::Array(Some(items))
             }
             Err(e) => map_err(e),
@@ -528,7 +532,9 @@ impl CommandHandler for SScanCommand {
                         pattern = args[i].as_str().map(|s| s.to_string());
                     }
                 }
-                Some("COUNT") => { i += 1; }
+                Some("COUNT") => {
+                    i += 1;
+                }
                 _ => {}
             }
             i += 1;
@@ -641,7 +647,10 @@ impl CommandHandler for SInterCardCommand {
         if args.len() < 2 + numkeys {
             return RespValue::error("ERR syntax error");
         }
-        let keys: Vec<&[u8]> = args[2..2 + numkeys].iter().filter_map(|a| a.as_bytes()).collect();
+        let keys: Vec<&[u8]> = args[2..2 + numkeys]
+            .iter()
+            .filter_map(|a| a.as_bytes())
+            .collect();
 
         let mut limit: usize = 0;
         let mut i = 2 + numkeys;
@@ -657,7 +666,11 @@ impl CommandHandler for SInterCardCommand {
 
         match sinter_sets(self.db.as_ref(), *db_index, &keys) {
             Ok(members) => {
-                let count = if limit > 0 { members.len().min(limit) } else { members.len() };
+                let count = if limit > 0 {
+                    members.len().min(limit)
+                } else {
+                    members.len()
+                };
                 RespValue::integer(count as i64)
             }
             Err(e) => map_err(e),

@@ -1,3 +1,5 @@
+use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 /// ACL (Access Control List) system — compatible with Redis 6+ ACL
 ///
 /// Supports:
@@ -14,7 +16,6 @@
 ///
 /// Password storage: SHA-256 hex hash, or literal "#<hash>" prefix.
 use std::collections::{HashMap, VecDeque};
-use parking_lot::RwLock;
 
 /// Bitmask of command categories
 pub const CAT_READ: u64 = 1 << 0;
@@ -107,6 +108,26 @@ impl AclUser {
         }
         let hash = sha256_hex(password.as_bytes());
         self.passwords.iter().any(|p| p == &hash)
+    }
+
+    pub fn can_run_command(&self, command: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let command = command.to_ascii_lowercase();
+        if self.denied_commands.iter().any(|c| c == &command) {
+            return false;
+        }
+        if self.allowed_commands.iter().any(|c| c == &command) {
+            return true;
+        }
+        if self.allowed_categories == CAT_ALL {
+            return true;
+        }
+
+        let mask = command_category_mask(&command);
+        mask != 0 && (self.allowed_categories & mask) != 0
     }
 
     /// Serialize user to ACL rule string (as shown in ACL LIST).
@@ -211,10 +232,14 @@ impl AclManager {
     pub fn authenticate(&self, username: &str, password: &str) -> Result<String, String> {
         let users = self.users.read();
         match users.get(username) {
-            None => Err(format!("WRONGPASS invalid username-password pair or user is disabled.")),
+            None => Err(format!(
+                "WRONGPASS invalid username-password pair or user is disabled."
+            )),
             Some(user) => {
                 if !user.enabled {
-                    return Err("WRONGPASS invalid username-password pair or user is disabled.".to_string());
+                    return Err(
+                        "WRONGPASS invalid username-password pair or user is disabled.".to_string(),
+                    );
                 }
                 if user.check_password(password) {
                     Ok(username.to_string())
@@ -321,7 +346,9 @@ impl AclManager {
                     // simplified: treat as key pattern
                     if let Some(tilde) = r.find('~') {
                         let pat = r[tilde + 1..].to_string();
-                        if pat == "*" { user.allkeys = true; }
+                        if pat == "*" {
+                            user.allkeys = true;
+                        }
                         if !user.key_patterns.contains(&pat) {
                             user.key_patterns.push(pat);
                         }
@@ -409,12 +436,18 @@ impl AclManager {
 
     /// ACL LIST — returns all users as ACL rule strings.
     pub fn list_users(&self) -> Vec<String> {
-        self.users.read().values().map(|u| u.to_acl_rule()).collect()
+        self.users
+            .read()
+            .values()
+            .map(|u| u.to_acl_rule())
+            .collect()
     }
 
     /// ACL LOG — add entry.
     pub fn log_entry(&self, reason: &str, object: &str, username: &str, client_info: &str) {
-        let id = self.next_entry_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_entry_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -459,38 +492,96 @@ impl AclManager {
     pub fn user_names(&self) -> Vec<String> {
         self.users.read().keys().cloned().collect()
     }
+
+    pub fn is_command_allowed(&self, username: &str, command: &str) -> bool {
+        self.users
+            .read()
+            .get(username)
+            .map(|user| user.can_run_command(command))
+            .unwrap_or(false)
+    }
 }
 
 /// SHA-256 hex of data (used for password hashing).
 pub fn sha256_hex(data: &[u8]) -> String {
-    // Simple SHA-256 implementation using sha2 if available, else manual.
-    // We'll use a simple approach since we already have sha1 dep.
-    // For production, use sha2 crate. For now, use a deterministic hash.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    format!("{:x}", Sha256::digest(data))
+}
 
-    // Note: In production, use sha2::Sha256. Here we use a placeholder
-    // that is deterministic but not cryptographically secure.
-    // TODO: Add sha2 crate dependency for real SHA-256.
-    // For now, produce a consistent 64-char hex string via double hashing.
-    let mut h1 = DefaultHasher::new();
-    data.hash(&mut h1);
-    let v1 = h1.finish();
+fn command_category_mask(command: &str) -> u64 {
+    let command = command.to_ascii_uppercase();
+    match command.as_str() {
+        "AUTH" | "HELLO" | "ACL" | "CLIENT" | "COMMAND" | "CONFIG" | "INFO" | "DBSIZE"
+        | "SELECT" | "PING" | "ECHO" | "QUIT" | "RESET" | "DEBUG" | "SLOWLOG" | "LATENCY"
+        | "MEMORY" | "SAVE" | "BGSAVE" | "BGREWRITEAOF" | "LASTSAVE" | "TIME" | "WAIT"
+        | "WAITAOF" | "OBJECT" | "LOLWUT" | "REPLICAOF" | "SLAVEOF" | "FAILOVER" | "PSYNC"
+        | "REPLCONF" | "CLUSTER" | "DFLY" => CAT_SERVER,
+        "PUBLISH" | "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "PUBSUB"
+        | "SPUBLISH" | "SSUBSCRIBE" | "SUNSUBSCRIBE" => CAT_PUBSUB,
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "SCRIPT" | "FUNCTION" | "FCALL"
+        | "FCALL_RO" => CAT_SCRIPTING,
+        "DEL" | "UNLINK" | "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" | "PERSIST"
+        | "RENAME" | "RENAMENX" | "MOVE" | "COPY" | "RESTORE" | "SWAPDB" | "FLUSHALL"
+        | "FLUSHDB" => CAT_WRITE,
+        "EXISTS" | "TTL" | "PTTL" | "EXPIRETIME" | "PEXPIRETIME" | "KEYS" | "SCAN" | "TYPE"
+        | "RANDOMKEY" | "TOUCH" | "SORT" | "SORT_RO" | "DUMP" => CAT_READ,
+        "GET" | "MGET" | "GETSET" | "GETDEL" | "GETEX" | "GETBIT" | "BITCOUNT" | "BITPOS"
+        | "BITFIELD_RO" | "STRLEN" | "GETRANGE" | "SUBSTR" | "LCS" => CAT_READ | CAT_STRING,
+        "SET" | "MSET" | "SETNX" | "SETEX" | "PSETEX" | "MSETNX" | "INCR" | "DECR" | "INCRBY"
+        | "DECRBY" | "APPEND" | "SETRANGE" | "SETBIT" | "BITOP" | "BITFIELD" | "INCRBYFLOAT" => {
+            CAT_WRITE | CAT_STRING
+        }
+        "HEXISTS" | "HGET" | "HGETALL" | "HMGET" | "HLEN" | "HKEYS" | "HVALS" | "HSTRLEN"
+        | "HRANDFIELD" | "HSCAN" | "HTTL" | "HPTTL" | "HEXPIRETIME" | "HPEXPIRETIME" => {
+            CAT_READ | CAT_HASH
+        }
+        "HSET" | "HDEL" | "HMSET" | "HINCRBY" | "HSETNX" | "HINCRBYFLOAT" | "HEXPIRE"
+        | "HPEXPIRE" | "HEXPIREAT" | "HPEXPIREAT" | "HPERSIST" => CAT_WRITE | CAT_HASH,
+        "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" | "LPOP" | "RPOP" | "LINDEX" | "LINSERT"
+        | "LSET" | "LREM" | "LTRIM" | "LMOVE" | "RPOPLPUSH" | "BLPOP" | "BRPOP" | "BLMOVE"
+        | "BRPOPLPUSH" | "LMPOP" | "BLMPOP" | "LPOS" => CAT_READ | CAT_WRITE | CAT_LIST,
+        "LLEN" | "LRANGE" => CAT_READ | CAT_LIST,
+        "SADD" | "SREM" | "SMOVE" | "SPOP" | "SUNIONSTORE" | "SINTERSTORE" | "SDIFFSTORE" => {
+            CAT_WRITE | CAT_SET
+        }
+        "SMEMBERS" | "SISMEMBER" | "SMISMEMBER" | "SCARD" | "SRANDMEMBER" | "SUNION" | "SINTER"
+        | "SDIFF" | "SSCAN" | "SINTERCARD" => CAT_READ | CAT_SET,
+        "ZADD" | "ZREM" | "ZINCRBY" | "ZPOPMIN" | "ZPOPMAX" | "ZREMRANGEBYSCORE"
+        | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZUNIONSTORE"
+        | "ZRANGESTORE" | "BZMPOP" | "BZPOPMIN" | "BZPOPMAX" | "ZMPOP" => CAT_WRITE | CAT_SORTEDSET,
+        "ZSCORE" | "ZRANK" | "ZREVRANK" | "ZRANGE" | "ZRANGEBYSCORE" | "ZREVRANGEBYSCORE"
+        | "ZRANGEBYLEX" | "ZCOUNT" | "ZLEXCOUNT" | "ZCARD" | "ZREVRANGE" | "ZMSCORE" | "ZDIFF"
+        | "ZINTER" | "ZUNION" | "ZRANDMEMBER" | "ZSCAN" | "ZINTERCARD" => CAT_READ | CAT_SORTEDSET,
+        _ if command.starts_with("GEO") => CAT_GEO | CAT_READ | CAT_WRITE,
+        _ if command.starts_with("X") => CAT_STREAM | CAT_READ | CAT_WRITE,
+        _ if command.starts_with("PF") => CAT_HLL | CAT_READ | CAT_WRITE,
+        _ => 0,
+    }
+}
 
-    let mut h2 = DefaultHasher::new();
-    v1.hash(&mut h2);
-    data.hash(&mut h2);
-    let v2 = h2.finish();
+#[cfg(test)]
+mod tests {
+    use super::{sha256_hex, AclManager};
 
-    let mut h3 = DefaultHasher::new();
-    v2.hash(&mut h3);
-    v1.hash(&mut h3);
-    let v3 = h3.finish();
+    #[test]
+    fn sha256_hex_matches_standard_digest() {
+        assert_eq!(
+            sha256_hex(b"secret"),
+            "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
+        );
+    }
 
-    let mut h4 = DefaultHasher::new();
-    v3.hash(&mut h4);
-    data.len().hash(&mut h4);
-    let v4 = h4.finish();
+    #[test]
+    fn acl_enforces_command_permissions() {
+        let acl = AclManager::new(16);
+        acl.set_user("reader", &["on", ">secret", "+@read"])
+            .expect("reader user should be created");
 
-    format!("{:016x}{:016x}{:016x}{:016x}", v1, v2, v3, v4)
+        assert!(acl.is_command_allowed("reader", "GET"));
+        assert!(acl.is_command_allowed("reader", "TTL"));
+        assert!(!acl.is_command_allowed("reader", "SET"));
+
+        acl.set_user("reader", &["-get"])
+            .expect("deny rule should apply");
+        assert!(!acl.is_command_allowed("reader", "GET"));
+    }
 }

@@ -13,6 +13,7 @@ parking_lot = "0.12"
 crc32fast = "1"
 memmap2 = "0.9"
 sha1 = "0.10"
+sha2 = "0.10"
 hex = "0.4"
 lazy_static = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
