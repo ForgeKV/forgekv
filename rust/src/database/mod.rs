@@ -23,7 +23,10 @@ pub enum RedisError {
 impl std::fmt::Display for RedisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RedisError::WrongType => write!(f, "WRONGTYPE Operation against a key holding the wrong kind of value"),
+            RedisError::WrongType => write!(
+                f,
+                "WRONGTYPE Operation against a key holding the wrong kind of value"
+            ),
             RedisError::NotInteger => write!(f, "ERR value is not an integer or out of range"),
             RedisError::Overflow => write!(f, "ERR increment or decrement would overflow"),
             RedisError::NxFail => write!(f, "NX condition failed"),
@@ -35,7 +38,7 @@ impl std::fmt::Display for RedisError {
 
 /// Number of key-space shards. Each shard has its own RwLock, so concurrent
 /// operations on different keys can proceed in parallel.
-const NUM_SHARDS: usize = 64;
+const NUM_SHARDS: usize = 256;
 
 pub struct RedisDatabase {
     storage: Arc<LsmStorage>,
@@ -66,7 +69,10 @@ fn now_ms() -> i64 {
 
 impl RedisDatabase {
     pub fn new(storage: Arc<LsmStorage>, num_dbs: usize) -> Self {
-        let shards = (0..NUM_SHARDS).map(|_| RwLock::new(())).collect::<Vec<_>>().into_boxed_slice();
+        let shards = (0..NUM_SHARDS)
+            .map(|_| RwLock::new(()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         RedisDatabase {
             storage,
             num_dbs,
@@ -129,26 +135,35 @@ impl RedisDatabase {
         Some(RedisMetadata::deserialize(&data))
     }
 
+    /// Save metadata. Callers must set `meta.version` to the **current** stored
+    /// version (or 0 for a new key); this method increments it by 1 automatically.
+    /// This avoids a redundant storage read that the old implementation performed.
     fn save_meta_inner(&self, db: usize, key: &[u8], meta: &RedisMetadata) {
-        // Auto-increment version: always use old_version+1 so OBJECT VERSION tracks writes
-        let old_version = self.get_meta_inner(db, key).map(|m| m.version).unwrap_or(0);
-        let new_version = old_version + 1;
         let meta_to_save = RedisMetadata {
             r#type: meta.r#type,
             count: meta.count,
             expiry_ms: meta.expiry_ms,
             list_head: meta.list_head,
             list_tail: meta.list_tail,
-            version: new_version,
+            version: meta.version + 1,
         };
         let meta_key = encode_meta_key(db, key);
         self.storage.put(meta_key, meta_to_save.serialize());
     }
 
     fn is_live_key_inner(&self, db: usize, key: &[u8]) -> bool {
-        match self.get_meta_inner(db, key) {
-            None => false,
-            Some(meta) => !meta.is_expired_at(now_ms()),
+        self.get_live_meta_inner(db, key).is_some()
+    }
+
+    /// Single-read alternative to `is_live_key_inner` + `get_meta_inner`.
+    /// Returns `Some(meta)` only if the key exists and is not expired.
+    #[inline]
+    fn get_live_meta_inner(&self, db: usize, key: &[u8]) -> Option<RedisMetadata> {
+        let meta = self.get_meta_inner(db, key)?;
+        if meta.is_expired_at(now_ms()) {
+            None
+        } else {
+            Some(meta)
         }
     }
 
@@ -199,7 +214,7 @@ impl RedisDatabase {
             }
             RedisType::Hash => self.delete_all_with_prefix(TAG_HASH, db, key),
             RedisType::List => self.delete_all_with_prefix(TAG_LIST, db, key),
-            RedisType::Set  => self.delete_all_with_prefix(TAG_SET, db, key),
+            RedisType::Set => self.delete_all_with_prefix(TAG_SET, db, key),
             RedisType::ZSet => self.delete_all_with_prefix(TAG_ZSET, db, key),
             RedisType::None => {}
         }
@@ -263,7 +278,8 @@ impl RedisDatabase {
         // One WAL lock acquisition covers both the meta key and the string data key.
         let meta_key = encode_meta_key(db, key);
         let sk = encode_string_key(db, key);
-        self.storage.put2(meta_key, meta.serialize(), sk, value.to_vec());
+        self.storage
+            .put2(meta_key, meta.serialize(), sk, value.to_vec());
 
         Ok(())
     }
@@ -326,8 +342,8 @@ impl RedisDatabase {
     pub fn string_incr(&self, db: usize, key: &[u8], delta: i64) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let current: i64 = if self.is_live_key_inner(db, key) {
-            let meta = self.get_meta_inner(db, key).unwrap();
+        let existing = self.get_live_meta_inner(db, key);
+        let current: i64 = if let Some(ref meta) = existing {
             if meta.r#type != RedisType::String {
                 return Err(RedisError::WrongType);
             }
@@ -336,7 +352,9 @@ impl RedisDatabase {
                 None => 0,
                 Some(v) => {
                     let s = std::str::from_utf8(&v).map_err(|_| RedisError::NotInteger)?;
-                    s.trim().parse::<i64>().map_err(|_| RedisError::NotInteger)?
+                    s.trim()
+                        .parse::<i64>()
+                        .map_err(|_| RedisError::NotInteger)?
                 }
             }
         } else {
@@ -345,7 +363,7 @@ impl RedisDatabase {
 
         let new_val = current.checked_add(delta).ok_or(RedisError::Overflow)?;
 
-        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
+        let mut meta = existing.unwrap_or(RedisMetadata {
             r#type: RedisType::String,
             count: 1,
             expiry_ms: 0,
@@ -363,11 +381,16 @@ impl RedisDatabase {
         Ok(new_val)
     }
 
-    pub fn string_append(&self, db: usize, key: &[u8], to_append: &[u8]) -> Result<i64, RedisError> {
+    pub fn string_append(
+        &self,
+        db: usize,
+        key: &[u8],
+        to_append: &[u8],
+    ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let existing = if self.is_live_key_inner(db, key) {
-            let meta = self.get_meta_inner(db, key).unwrap();
+        let live_meta = self.get_live_meta_inner(db, key);
+        let existing = if let Some(ref meta) = live_meta {
             if meta.r#type != RedisType::String {
                 return Err(RedisError::WrongType);
             }
@@ -381,7 +404,7 @@ impl RedisDatabase {
         new_val.extend_from_slice(to_append);
         let new_len = new_val.len() as i64;
 
-        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
+        let mut meta = live_meta.unwrap_or(RedisMetadata {
             r#type: RedisType::String,
             count: 1,
             expiry_ms: 0,
@@ -436,29 +459,34 @@ impl RedisDatabase {
     pub fn expire(&self, db: usize, key: &[u8], expiry_ms: i64) -> Result<bool, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(false);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(false),
+            Some(m) => m,
+        };
         self.set_expiry_inner(db, key, &mut meta, expiry_ms);
         self.save_meta_inner(db, key, &meta);
 
         Ok(true)
     }
 
-    pub fn expire_cond(&self, db: usize, key: &[u8], expiry_ms: i64, cond: u8) -> Result<i64, RedisError> {
+    pub fn expire_cond(
+        &self,
+        db: usize,
+        key: &[u8],
+        expiry_ms: i64,
+        cond: u8,
+    ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         let current_expiry = meta.expiry_ms;
         let should_set = match cond {
-            0 => current_expiry == 0,                                      // NX: only if no expiry
-            1 => current_expiry != 0,                                      // XX: only if has expiry
-            2 => current_expiry != 0 && expiry_ms > current_expiry,        // GT: only if new > current
-            3 => current_expiry == 0 || expiry_ms < current_expiry,        // LT: infinite = always set
+            0 => current_expiry == 0, // NX: only if no expiry
+            1 => current_expiry != 0, // XX: only if has expiry
+            2 => current_expiry != 0 && expiry_ms > current_expiry, // GT: only if new > current
+            3 => current_expiry == 0 || expiry_ms < current_expiry, // LT: infinite = always set
             _ => true,
         };
         if !should_set {
@@ -522,8 +550,12 @@ impl RedisDatabase {
         match self.get_meta_inner(db, key) {
             None => Ok(-2),
             Some(m) => {
-                if m.is_expired_at(now_ms()) { return Ok(-2); }
-                if m.expiry_ms == 0 { return Ok(-1); }
+                if m.is_expired_at(now_ms()) {
+                    return Ok(-2);
+                }
+                if m.expiry_ms == 0 {
+                    return Ok(-1);
+                }
                 Ok(m.expiry_ms / 1000)
             }
         }
@@ -534,8 +566,12 @@ impl RedisDatabase {
         match self.get_meta_inner(db, key) {
             None => Ok(-2),
             Some(m) => {
-                if m.is_expired_at(now_ms()) { return Ok(-2); }
-                if m.expiry_ms == 0 { return Ok(-1); }
+                if m.is_expired_at(now_ms()) {
+                    return Ok(-2);
+                }
+                if m.expiry_ms == 0 {
+                    return Ok(-1);
+                }
                 Ok(m.expiry_ms)
             }
         }
@@ -730,11 +766,10 @@ impl RedisDatabase {
     pub fn persist(&self, db: usize, key: &[u8]) -> Result<bool, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(false);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(false),
+            Some(m) => m,
+        };
         if meta.expiry_ms == 0 {
             return Ok(false);
         }
@@ -829,64 +864,60 @@ impl RedisDatabase {
 
     // ── Hash commands ─────────────────────────────────────────────────────────
 
-    pub fn hset(
-        &self,
-        db: usize,
-        key: &[u8],
-        pairs: &[(&[u8], &[u8])],
-    ) -> Result<i64, RedisError> {
+    pub fn hset(&self, db: usize, key: &[u8], pairs: &[(&[u8], &[u8])]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
-            r#type: RedisType::Hash,
-            count: 0,
-            expiry_ms: 0,
-            list_head: 0,
-            list_tail: 0,
-            version: 0,
-        });
-
-        if self.is_live_key_inner(db, key) && meta.r#type != RedisType::Hash {
-            return Err(RedisError::WrongType);
-        }
-
-        if meta.is_expired_at(now_ms()) {
-            // Key expired, reset
-            meta = RedisMetadata {
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::Hash {
+                    return Err(RedisError::WrongType);
+                }
+                m
+            }
+            None => RedisMetadata {
                 r#type: RedisType::Hash,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            };
-        }
+            },
+        };
 
         meta.r#type = RedisType::Hash;
         let mut added = 0i64;
 
-        for (field, value) in pairs {
+        // Check which fields are new (requires individual gets)
+        for (field, _) in pairs {
             let hk = encode_hash_key(db, key, field);
-            let existing = self.storage.get(&hk);
-            if existing.is_none() {
+            if self.storage.get(&hk).is_none() {
                 added += 1;
                 meta.count += 1;
             }
-            self.storage.put(hk, value.to_vec());
         }
 
-        self.save_meta_inner(db, key, &meta);
+        // Batch all writes (hash fields + meta) into a single put_batch
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(pairs.len() + 1);
+        for (field, value) in pairs {
+            batch.push((encode_hash_key(db, key, field), value.to_vec()));
+        }
+        let meta_to_save = RedisMetadata {
+            version: meta.version + 1,
+            ..meta
+        };
+        batch.push((encode_meta_key(db, key), meta_to_save.serialize()));
+        self.storage.put_batch(&batch);
+
         Ok(added)
     }
 
     pub fn hget(&self, db: usize, key: &[u8], field: &[u8]) -> Result<Option<Vec<u8>>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Hash {
             return Err(RedisError::WrongType);
         }
@@ -898,11 +929,10 @@ impl RedisDatabase {
     pub fn hdel(&self, db: usize, key: &[u8], fields: &[&[u8]]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Hash {
             return Err(RedisError::WrongType);
         }
@@ -929,11 +959,10 @@ impl RedisDatabase {
     pub fn hgetall(&self, db: usize, key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Hash {
             return Err(RedisError::WrongType);
         }
@@ -955,9 +984,11 @@ impl RedisDatabase {
             if encoded_key.len() < header_size + 2 {
                 continue;
             }
-            let field_len =
-                u16::from_be_bytes(encoded_key[header_size..header_size + 2].try_into().unwrap())
-                    as usize;
+            let field_len = u16::from_be_bytes(
+                encoded_key[header_size..header_size + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             if encoded_key.len() < header_size + 2 + field_len {
                 continue;
             }
@@ -971,11 +1002,10 @@ impl RedisDatabase {
     pub fn hexists(&self, db: usize, key: &[u8], field: &[u8]) -> Result<bool, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(false);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(false),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Hash {
             return Err(RedisError::WrongType);
         }
@@ -987,11 +1017,10 @@ impl RedisDatabase {
     pub fn hlen(&self, db: usize, key: &[u8]) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Hash {
             return Err(RedisError::WrongType);
         }
@@ -1018,39 +1047,45 @@ impl RedisDatabase {
         elements: &[&[u8]],
         left: bool,
     ) -> Result<i64, RedisError> {
-        let mut meta = if self.is_live_key_inner(db, key) {
-            let m = self.get_meta_inner(db, key).unwrap();
-            if m.r#type != RedisType::List {
-                return Err(RedisError::WrongType);
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::List {
+                    return Err(RedisError::WrongType);
+                }
+                m
             }
-            m
-        } else {
-            RedisMetadata {
+            None => RedisMetadata {
                 r#type: RedisType::List,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
 
         meta.r#type = RedisType::List;
 
+        // Batch all element writes + meta update into a single put_batch
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(elements.len() + 1);
         for &elem in elements {
             if left {
                 meta.list_head -= 1;
-                let lk = encode_list_key(db, key, meta.list_head);
-                self.storage.put(lk, elem.to_vec());
+                batch.push((encode_list_key(db, key, meta.list_head), elem.to_vec()));
             } else {
-                let lk = encode_list_key(db, key, meta.list_tail);
-                self.storage.put(lk, elem.to_vec());
+                batch.push((encode_list_key(db, key, meta.list_tail), elem.to_vec()));
                 meta.list_tail += 1;
             }
             meta.count += 1;
         }
 
-        self.save_meta_inner(db, key, &meta);
+        let meta_to_save = RedisMetadata {
+            version: meta.version + 1,
+            ..meta
+        };
+        batch.push((encode_meta_key(db, key), meta_to_save.serialize()));
+        self.storage.put_batch(&batch);
+
         Ok(meta.count)
     }
 
@@ -1065,11 +1100,10 @@ impl RedisDatabase {
     }
 
     fn pop_inner(&self, db: usize, key: &[u8], left: bool) -> Result<Option<Vec<u8>>, RedisError> {
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -1110,11 +1144,10 @@ impl RedisDatabase {
     ) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -1128,8 +1161,16 @@ impl RedisDatabase {
         }
 
         // Normalize indices
-        let start = if start < 0 { (count + start).max(0) } else { start.min(count) };
-        let stop = if stop < 0 { (count + stop).max(-1) } else { stop.min(count - 1) };
+        let start = if start < 0 {
+            (count + start).max(0)
+        } else {
+            start.min(count)
+        };
+        let stop = if stop < 0 {
+            (count + stop).max(-1)
+        } else {
+            stop.min(count - 1)
+        };
 
         if start > stop {
             return Ok(vec![]);
@@ -1153,11 +1194,10 @@ impl RedisDatabase {
     pub fn llen(&self, db: usize, key: &[u8]) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -1171,47 +1211,57 @@ impl RedisDatabase {
     pub fn sadd(&self, db: usize, key: &[u8], members: &[&[u8]]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let mut meta = if self.is_live_key_inner(db, key) {
-            let m = self.get_meta_inner(db, key).unwrap();
-            if m.r#type != RedisType::Set {
-                return Err(RedisError::WrongType);
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::Set {
+                    return Err(RedisError::WrongType);
+                }
+                m
             }
-            m
-        } else {
-            RedisMetadata {
+            None => RedisMetadata {
                 r#type: RedisType::Set,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
 
         meta.r#type = RedisType::Set;
         let mut added = 0i64;
 
+        // Check which members are new
         for &member in members {
             let sk = encode_set_key(db, key, member);
             if self.storage.get(&sk).is_none() {
                 added += 1;
                 meta.count += 1;
             }
-            self.storage.put(sk, vec![1u8]);
         }
 
-        self.save_meta_inner(db, key, &meta);
+        // Batch all writes
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(members.len() + 1);
+        for &member in members {
+            batch.push((encode_set_key(db, key, member), vec![1u8]));
+        }
+        let meta_to_save = RedisMetadata {
+            version: meta.version + 1,
+            ..meta
+        };
+        batch.push((encode_meta_key(db, key), meta_to_save.serialize()));
+        self.storage.put_batch(&batch);
+
         Ok(added)
     }
 
     pub fn srem(&self, db: usize, key: &[u8], members: &[&[u8]]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -1238,11 +1288,10 @@ impl RedisDatabase {
     pub fn smembers(&self, db: usize, key: &[u8]) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -1263,9 +1312,11 @@ impl RedisDatabase {
             if encoded_key.len() < header_size + 2 {
                 continue;
             }
-            let member_len =
-                u16::from_be_bytes(encoded_key[header_size..header_size + 2].try_into().unwrap())
-                    as usize;
+            let member_len = u16::from_be_bytes(
+                encoded_key[header_size..header_size + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             if encoded_key.len() < header_size + 2 + member_len {
                 continue;
             }
@@ -1279,11 +1330,10 @@ impl RedisDatabase {
     pub fn sismember(&self, db: usize, key: &[u8], member: &[u8]) -> Result<bool, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(false);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(false),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -1295,11 +1345,10 @@ impl RedisDatabase {
     pub fn scard(&self, db: usize, key: &[u8]) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -1310,29 +1359,24 @@ impl RedisDatabase {
 
     // ── Sorted Set commands ───────────────────────────────────────────────────
 
-    pub fn zadd(
-        &self,
-        db: usize,
-        key: &[u8],
-        pairs: &[(f64, &[u8])],
-    ) -> Result<i64, RedisError> {
+    pub fn zadd(&self, db: usize, key: &[u8], pairs: &[(f64, &[u8])]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let mut meta = if self.is_live_key_inner(db, key) {
-            let m = self.get_meta_inner(db, key).unwrap();
-            if m.r#type != RedisType::ZSet {
-                return Err(RedisError::WrongType);
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::ZSet {
+                    return Err(RedisError::WrongType);
+                }
+                m
             }
-            m
-        } else {
-            RedisMetadata {
+            None => RedisMetadata {
                 r#type: RedisType::ZSet,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
 
         meta.r#type = RedisType::ZSet;
@@ -1370,11 +1414,10 @@ impl RedisDatabase {
     pub fn zrem(&self, db: usize, key: &[u8], members: &[&[u8]]) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -1413,11 +1456,10 @@ impl RedisDatabase {
     ) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -1441,9 +1483,9 @@ impl RedisDatabase {
                 continue;
             }
             let score = decode_sortable_double(&encoded_key[base_len..base_len + 8]);
-            let member_len = u16::from_be_bytes(
-                encoded_key[base_len + 8..base_len + 10].try_into().unwrap(),
-            ) as usize;
+            let member_len =
+                u16::from_be_bytes(encoded_key[base_len + 8..base_len + 10].try_into().unwrap())
+                    as usize;
             if encoded_key.len() < base_len + 10 + member_len {
                 continue;
             }
@@ -1456,8 +1498,16 @@ impl RedisDatabase {
             return Ok(vec![]);
         }
 
-        let start = if start < 0 { (count + start).max(0) } else { start.min(count) };
-        let stop = if stop < 0 { (count + stop).max(-1) } else { stop.min(count - 1) };
+        let start = if start < 0 {
+            (count + start).max(0)
+        } else {
+            start.min(count)
+        };
+        let stop = if stop < 0 {
+            (count + stop).max(-1)
+        } else {
+            stop.min(count - 1)
+        };
 
         if start > stop {
             return Ok(vec![]);
@@ -1469,11 +1519,10 @@ impl RedisDatabase {
     pub fn zscore(&self, db: usize, key: &[u8], member: &[u8]) -> Result<Option<f64>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -1494,11 +1543,10 @@ impl RedisDatabase {
     pub fn zcard(&self, db: usize, key: &[u8]) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -1510,11 +1558,10 @@ impl RedisDatabase {
     pub fn zrank(&self, db: usize, key: &[u8], member: &[u8]) -> Result<Option<i64>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -1550,9 +1597,9 @@ impl RedisDatabase {
                 continue;
             }
             let entry_score = decode_sortable_double(&encoded_key[base_len..base_len + 8]);
-            let entry_member_len = u16::from_be_bytes(
-                encoded_key[base_len + 8..base_len + 10].try_into().unwrap(),
-            ) as usize;
+            let entry_member_len =
+                u16::from_be_bytes(encoded_key[base_len + 8..base_len + 10].try_into().unwrap())
+                    as usize;
             if encoded_key.len() < base_len + 10 + entry_member_len {
                 continue;
             }
@@ -1580,11 +1627,10 @@ impl RedisDatabase {
     pub fn string_getdel(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::String {
             return Err(RedisError::WrongType);
         }
@@ -1604,11 +1650,10 @@ impl RedisDatabase {
     ) -> Result<Option<Vec<u8>>, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::String {
             return Err(RedisError::WrongType);
         }
@@ -1633,8 +1678,8 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let existing: Vec<u8> = if self.is_live_key_inner(db, key) {
-            let meta = self.get_meta_inner(db, key).unwrap();
+        let live_meta = self.get_live_meta_inner(db, key);
+        let existing: Vec<u8> = if let Some(ref meta) = live_meta {
             if meta.r#type != RedisType::String {
                 return Err(RedisError::WrongType);
             }
@@ -1652,7 +1697,7 @@ impl RedisDatabase {
         new_val[offset..offset + value.len()].copy_from_slice(value);
         let result_len = new_val.len() as i64;
 
-        let mut meta = self.get_meta_inner(db, key).unwrap_or(RedisMetadata {
+        let mut meta = live_meta.unwrap_or(RedisMetadata {
             r#type: RedisType::String,
             count: 1,
             expiry_ms: 0,
@@ -1793,24 +1838,30 @@ impl RedisDatabase {
 
     // ── Hash extended commands ────────────────────────────────────────────────
 
-    pub fn hsetnx(&self, db: usize, key: &[u8], field: &[u8], value: &[u8]) -> Result<i64, RedisError> {
+    pub fn hsetnx(
+        &self,
+        db: usize,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+    ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        let mut meta = if self.is_live_key_inner(db, key) {
-            let m = self.get_meta_inner(db, key).unwrap();
-            if m.r#type != RedisType::Hash {
-                return Err(RedisError::WrongType);
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::Hash {
+                    return Err(RedisError::WrongType);
+                }
+                m
             }
-            m
-        } else {
-            RedisMetadata {
+            None => RedisMetadata {
                 r#type: RedisType::Hash,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
 
         let hk = encode_hash_key(db, key, field);
@@ -1837,11 +1888,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -1910,14 +1960,19 @@ impl RedisDatabase {
         result
     }
 
-    pub fn lset(&self, db: usize, key: &[u8], index: i64, element: &[u8]) -> Result<(), RedisError> {
+    pub fn lset(
+        &self,
+        db: usize,
+        key: &[u8],
+        index: i64,
+        element: &[u8],
+    ) -> Result<(), RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Err(RedisError::Other("ERR no such key".to_string()));
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Err(RedisError::Other("ERR no such key".to_string())),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -1934,14 +1989,19 @@ impl RedisDatabase {
         Ok(())
     }
 
-    pub fn lrem(&self, db: usize, key: &[u8], count: i64, element: &[u8]) -> Result<i64, RedisError> {
+    pub fn lrem(
+        &self,
+        db: usize,
+        key: &[u8],
+        count: i64,
+        element: &[u8],
+    ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -2025,18 +2085,25 @@ impl RedisDatabase {
     pub fn ltrim(&self, db: usize, key: &[u8], start: i64, stop: i64) -> Result<(), RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(());
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(()),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
 
         let count = meta.count;
-        let norm_start = if start < 0 { (count + start).max(0) } else { start.min(count) };
-        let norm_stop = if stop < 0 { (count + stop).max(-1) } else { stop.min(count - 1) };
+        let norm_start = if start < 0 {
+            (count + start).max(0)
+        } else {
+            start.min(count)
+        };
+        let norm_stop = if stop < 0 {
+            (count + stop).max(-1)
+        } else {
+            stop.min(count - 1)
+        };
 
         let items = self.lrange_inner(db, key, &meta);
 
@@ -2090,11 +2157,10 @@ impl RedisDatabase {
     ) -> Result<Option<Vec<u8>>, RedisError> {
         let _guard = self.shard_w_multi(&[src, dst]);
 
-        if !self.is_live_key_inner(db, src) {
-            return Ok(None);
-        }
-
-        let src_meta = self.get_meta_inner(db, src).unwrap();
+        let src_meta = match self.get_live_meta_inner(db, src) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if src_meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -2107,9 +2173,7 @@ impl RedisDatabase {
         };
 
         // Push to destination
-        let dst_meta_exists = self.is_live_key_inner(db, dst);
-        if dst_meta_exists {
-            let dm = self.get_meta_inner(db, dst).unwrap();
+        if let Some(dm) = self.get_live_meta_inner(db, dst) {
             if dm.r#type != RedisType::List {
                 return Err(RedisError::WrongType);
             }
@@ -2132,11 +2196,10 @@ impl RedisDatabase {
     ) -> Result<Vec<i64>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::List {
             return Err(RedisError::WrongType);
         }
@@ -2151,7 +2214,11 @@ impl RedisDatabase {
             // Forward scan
             let effective_rank = if rank == 0 { 1 } else { rank };
             let mut rank_counter = 0i64;
-            let scan_limit = if maxlen > 0 { maxlen as usize } else { list_len };
+            let scan_limit = if maxlen > 0 {
+                maxlen as usize
+            } else {
+                list_len
+            };
 
             for (i, (_, v)) in items.iter().enumerate().take(scan_limit) {
                 if v.as_slice() == element {
@@ -2172,7 +2239,11 @@ impl RedisDatabase {
             // Reverse scan
             let effective_rank = -rank;
             let mut rank_counter = 0i64;
-            let scan_limit = if maxlen > 0 { maxlen as usize } else { list_len };
+            let scan_limit = if maxlen > 0 {
+                maxlen as usize
+            } else {
+                list_len
+            };
 
             for (i, (_, v)) in items.iter().enumerate().rev().take(scan_limit) {
                 if v.as_slice() == element {
@@ -2194,7 +2265,12 @@ impl RedisDatabase {
         Ok(positions)
     }
 
-    pub fn lpop_count(&self, db: usize, key: &[u8], count: usize) -> Result<Vec<Vec<u8>>, RedisError> {
+    pub fn lpop_count(
+        &self,
+        db: usize,
+        key: &[u8],
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_w(key);
         let mut results = Vec::new();
         for _ in 0..count {
@@ -2206,7 +2282,12 @@ impl RedisDatabase {
         Ok(results)
     }
 
-    pub fn rpop_count(&self, db: usize, key: &[u8], count: usize) -> Result<Vec<Vec<u8>>, RedisError> {
+    pub fn rpop_count(
+        &self,
+        db: usize,
+        key: &[u8],
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_w(key);
         let mut results = Vec::new();
         for _ in 0..count {
@@ -2233,11 +2314,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w_multi(&[src, dst]);
 
-        if !self.is_live_key_inner(db, src) {
-            return Ok(0);
-        }
-
-        let mut src_meta = self.get_meta_inner(db, src).unwrap();
+        let mut src_meta = match self.get_live_meta_inner(db, src) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if src_meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -2248,8 +2328,7 @@ impl RedisDatabase {
         }
 
         // Check dst type if exists
-        if self.is_live_key_inner(db, dst) {
-            let dm = self.get_meta_inner(db, dst).unwrap();
+        if let Some(dm) = self.get_live_meta_inner(db, dst) {
             if dm.r#type != RedisType::Set {
                 return Err(RedisError::WrongType);
             }
@@ -2266,17 +2345,16 @@ impl RedisDatabase {
 
         // Add to dst
         let dst_sk = encode_set_key(db, dst, member);
-        let mut dst_meta = if self.is_live_key_inner(db, dst) {
-            self.get_meta_inner(db, dst).unwrap()
-        } else {
-            RedisMetadata {
+        let mut dst_meta = match self.get_live_meta_inner(db, dst) {
+            Some(m) => m,
+            None => RedisMetadata {
                 r#type: RedisType::Set,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
 
         if self.storage.get(&dst_sk).is_none() {
@@ -2292,11 +2370,10 @@ impl RedisDatabase {
     pub fn spop(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(None);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(None),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::Set {
             return Err(RedisError::WrongType);
         }
@@ -2315,9 +2392,11 @@ impl RedisDatabase {
             if encoded_key.len() < header_size + 2 {
                 continue;
             }
-            let member_len =
-                u16::from_be_bytes(encoded_key[header_size..header_size + 2].try_into().unwrap())
-                    as usize;
+            let member_len = u16::from_be_bytes(
+                encoded_key[header_size..header_size + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             if encoded_key.len() < header_size + 2 + member_len {
                 continue;
             }
@@ -2355,21 +2434,21 @@ impl RedisDatabase {
     ) -> Result<(i64, Option<f64>), RedisError> {
         let _guard = self.shard_w(key);
 
-        let mut meta = if self.is_live_key_inner(db, key) {
-            let m = self.get_meta_inner(db, key).unwrap();
-            if m.r#type != RedisType::ZSet {
-                return Err(RedisError::WrongType);
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            Some(m) => {
+                if m.r#type != RedisType::ZSet {
+                    return Err(RedisError::WrongType);
+                }
+                m
             }
-            m
-        } else {
-            RedisMetadata {
+            None => RedisMetadata {
                 r#type: RedisType::ZSet,
                 count: 0,
                 expiry_ms: 0,
                 list_head: 0,
                 list_tail: 0,
                 version: 0,
-            }
+            },
         };
         meta.r#type = RedisType::ZSet;
 
@@ -2384,7 +2463,9 @@ impl RedisDatabase {
                 // Member exists
                 if nx {
                     // NX: don't update existing
-                    if incr { last_score = Some(decode_sortable_double(&old_score_bytes)); }
+                    if incr {
+                        last_score = Some(decode_sortable_double(&old_score_bytes));
+                    }
                     continue;
                 }
 
@@ -2400,11 +2481,15 @@ impl RedisDatabase {
 
                 // GT/LT check
                 if gt && score <= old_score {
-                    if incr { last_score = Some(old_score); }
+                    if incr {
+                        last_score = Some(old_score);
+                    }
                     continue;
                 }
                 if lt && score >= old_score {
-                    if incr { last_score = Some(old_score); }
+                    if incr {
+                        last_score = Some(old_score);
+                    }
                     continue;
                 }
 
@@ -2455,11 +2540,10 @@ impl RedisDatabase {
 
     /// Scan score-ordered entries and return all (member, score)
     pub fn zrange_all(&self, db: usize, key: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2481,9 +2565,9 @@ impl RedisDatabase {
                 continue;
             }
             let score = decode_sortable_double(&encoded_key[base_len..base_len + 8]);
-            let member_len = u16::from_be_bytes(
-                encoded_key[base_len + 8..base_len + 10].try_into().unwrap(),
-            ) as usize;
+            let member_len =
+                u16::from_be_bytes(encoded_key[base_len + 8..base_len + 10].try_into().unwrap())
+                    as usize;
             if encoded_key.len() < base_len + 10 + member_len {
                 continue;
             }
@@ -2494,14 +2578,18 @@ impl RedisDatabase {
         Ok(all)
     }
 
-    pub fn zpopmin(&self, db: usize, key: &[u8], count: i64) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
+    pub fn zpopmin(
+        &self,
+        db: usize,
+        key: &[u8],
+        count: i64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2515,14 +2603,18 @@ impl RedisDatabase {
         Ok(to_pop)
     }
 
-    pub fn zpopmax(&self, db: usize, key: &[u8], count: i64) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
+    pub fn zpopmax(
+        &self,
+        db: usize,
+        key: &[u8],
+        count: i64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2555,9 +2647,9 @@ impl RedisDatabase {
                 continue;
             }
             let score = decode_sortable_double(&encoded_key[base_len..base_len + 8]);
-            let member_len = u16::from_be_bytes(
-                encoded_key[base_len + 8..base_len + 10].try_into().unwrap(),
-            ) as usize;
+            let member_len =
+                u16::from_be_bytes(encoded_key[base_len + 8..base_len + 10].try_into().unwrap())
+                    as usize;
             if encoded_key.len() < base_len + 10 + member_len {
                 continue;
             }
@@ -2569,11 +2661,10 @@ impl RedisDatabase {
     }
 
     fn zrem_inner(&self, db: usize, key: &[u8], members: &[&[u8]]) -> Result<i64, RedisError> {
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let mut meta = self.get_meta_inner(db, key).unwrap();
+        let mut meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2615,11 +2706,10 @@ impl RedisDatabase {
     ) -> Result<Vec<(Vec<u8>, f64)>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2661,11 +2751,10 @@ impl RedisDatabase {
     ) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(vec![]),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2721,11 +2810,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2755,11 +2843,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2802,19 +2889,26 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
 
         let all = self.zrange_all_inner(db, key);
         let count = all.len() as i64;
-        let norm_start = if start < 0 { (count + start).max(0) } else { start.min(count) };
-        let norm_stop = if stop < 0 { (count + stop).max(-1) } else { stop.min(count - 1) };
+        let norm_start = if start < 0 {
+            (count + start).max(0)
+        } else {
+            start.min(count)
+        };
+        let norm_stop = if stop < 0 {
+            (count + stop).max(-1)
+        } else {
+            stop.min(count - 1)
+        };
 
         if norm_start > norm_stop {
             return Ok(0);
@@ -2839,11 +2933,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2872,11 +2965,10 @@ impl RedisDatabase {
     ) -> Result<i64, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(0);
-        }
-
-        let meta = self.get_meta_inner(db, key).unwrap();
+        let meta = match self.get_live_meta_inner(db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
         if meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -2925,10 +3017,10 @@ impl RedisDatabase {
         let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
 
         for (i, &key) in keys.iter().enumerate() {
-            if !self.is_live_key_inner(db, key) {
-                continue;
-            }
-            let meta = self.get_meta_inner(db, key).unwrap();
+            let meta = match self.get_live_meta_inner(db, key) {
+                None => continue,
+                Some(m) => m,
+            };
             if meta.r#type != RedisType::ZSet {
                 return Err(RedisError::WrongType);
             }
@@ -2936,11 +3028,14 @@ impl RedisDatabase {
             let all = self.zrange_all_inner(db, key);
             for (member, score) in all {
                 let weighted = score * w;
-                let entry = combined.entry(member).or_insert(match aggregate.to_uppercase().as_str() {
-                    "MIN" => f64::INFINITY,
-                    "MAX" => f64::NEG_INFINITY,
-                    _ => 0.0,
-                });
+                let entry =
+                    combined
+                        .entry(member)
+                        .or_insert(match aggregate.to_uppercase().as_str() {
+                            "MIN" => f64::INFINITY,
+                            "MAX" => f64::NEG_INFINITY,
+                            _ => 0.0,
+                        });
                 *entry = match aggregate.to_uppercase().as_str() {
                     "MIN" => entry.min(weighted),
                     "MAX" => entry.max(weighted),
@@ -2993,11 +3088,13 @@ impl RedisDatabase {
 
         // Get first set
         let first_key = keys[0];
-        if !self.is_live_key_inner(db, first_key) {
-            self.delete_key_internal(db, dst, None);
-            return Ok(0);
-        }
-        let first_meta = self.get_meta_inner(db, first_key).unwrap();
+        let first_meta = match self.get_live_meta_inner(db, first_key) {
+            None => {
+                self.delete_key_internal(db, dst, None);
+                return Ok(0);
+            }
+            Some(m) => m,
+        };
         if first_meta.r#type != RedisType::ZSet {
             return Err(RedisError::WrongType);
         }
@@ -3010,17 +3107,17 @@ impl RedisDatabase {
 
         for (i, &key) in keys[1..].iter().enumerate() {
             let wi = weights.get(i + 1).copied().unwrap_or(1.0);
-            let members: HashMap<Vec<u8>, f64> = if self.is_live_key_inner(db, key) {
-                let meta = self.get_meta_inner(db, key).unwrap();
-                if meta.r#type != RedisType::ZSet {
-                    return Err(RedisError::WrongType);
+            let members: HashMap<Vec<u8>, f64> = match self.get_live_meta_inner(db, key) {
+                Some(meta) => {
+                    if meta.r#type != RedisType::ZSet {
+                        return Err(RedisError::WrongType);
+                    }
+                    self.zrange_all_inner(db, key)
+                        .into_iter()
+                        .map(|(m, s)| (m, s * wi))
+                        .collect()
                 }
-                self.zrange_all_inner(db, key)
-                    .into_iter()
-                    .map(|(m, s)| (m, s * wi))
-                    .collect()
-            } else {
-                HashMap::new()
+                None => HashMap::new(),
             };
 
             // Keep only members in both
@@ -3063,12 +3160,7 @@ impl RedisDatabase {
         Ok(meta.count)
     }
 
-    pub fn zdiffstore(
-        &self,
-        db: usize,
-        dst: &[u8],
-        keys: &[&[u8]],
-    ) -> Result<i64, RedisError> {
+    pub fn zdiffstore(&self, db: usize, dst: &[u8], keys: &[&[u8]]) -> Result<i64, RedisError> {
         let mut all_keys: Vec<&[u8]> = vec![dst];
         all_keys.extend_from_slice(keys);
         let _guard = self.shard_w_multi(&all_keys);
@@ -3080,20 +3172,19 @@ impl RedisDatabase {
         }
 
         let first_key = keys[0];
-        let first_all = if self.is_live_key_inner(db, first_key) {
-            let meta = self.get_meta_inner(db, first_key).unwrap();
-            if meta.r#type != RedisType::ZSet {
-                return Err(RedisError::WrongType);
+        let first_all = match self.get_live_meta_inner(db, first_key) {
+            Some(meta) => {
+                if meta.r#type != RedisType::ZSet {
+                    return Err(RedisError::WrongType);
+                }
+                self.zrange_all_inner(db, first_key)
             }
-            self.zrange_all_inner(db, first_key)
-        } else {
-            vec![]
+            None => vec![],
         };
 
         let mut exclude: HashSet<Vec<u8>> = HashSet::new();
         for &key in &keys[1..] {
-            if self.is_live_key_inner(db, key) {
-                let meta = self.get_meta_inner(db, key).unwrap();
+            if let Some(meta) = self.get_live_meta_inner(db, key) {
                 if meta.r#type != RedisType::ZSet {
                     return Err(RedisError::WrongType);
                 }
@@ -3137,7 +3228,13 @@ impl RedisDatabase {
 
     /// Copy all data for `src` into `dst` and delete `src`.  Called while the
     /// global write lock is already held; does NOT acquire the lock itself.
-    fn rename_data_inner(&self, db: usize, src: &[u8], dst: &[u8], src_meta: &metadata::RedisMetadata) {
+    fn rename_data_inner(
+        &self,
+        db: usize,
+        src: &[u8],
+        dst: &[u8],
+        src_meta: &metadata::RedisMetadata,
+    ) {
         match src_meta.r#type {
             RedisType::String => {
                 let sk = encode_string_key(db, src);
@@ -3154,9 +3251,15 @@ impl RedisDatabase {
                 let header_size = 1 + 1 + 2 + src.len();
                 for (k, v) in entries {
                     if let Some(v) = v {
-                        if k.len() < header_size + 2 { continue; }
-                        let field_len = u16::from_be_bytes(k[header_size..header_size+2].try_into().unwrap()) as usize;
-                        if k.len() < header_size + 2 + field_len { continue; }
+                        if k.len() < header_size + 2 {
+                            continue;
+                        }
+                        let field_len =
+                            u16::from_be_bytes(k[header_size..header_size + 2].try_into().unwrap())
+                                as usize;
+                        if k.len() < header_size + 2 + field_len {
+                            continue;
+                        }
                         let field = &k[header_size + 2..header_size + 2 + field_len];
                         let new_hk = encode_hash_key(db, dst, field);
                         self.storage.put(new_hk, v);
@@ -3171,8 +3274,11 @@ impl RedisDatabase {
                 let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
                 for (k, v) in entries {
                     if let Some(v) = v {
-                        if k.len() < header_size + 8 { continue; }
-                        let seq = i64::from_be_bytes(k[header_size..header_size+8].try_into().unwrap());
+                        if k.len() < header_size + 8 {
+                            continue;
+                        }
+                        let seq =
+                            i64::from_be_bytes(k[header_size..header_size + 8].try_into().unwrap());
                         let new_lk = encode_list_key(db, dst, seq);
                         self.storage.put(new_lk, v);
                     }
@@ -3186,9 +3292,15 @@ impl RedisDatabase {
                 let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
                 for (k, v) in entries {
                     if v.is_some() {
-                        if k.len() < header_size + 2 { continue; }
-                        let member_len = u16::from_be_bytes(k[header_size..header_size+2].try_into().unwrap()) as usize;
-                        if k.len() < header_size + 2 + member_len { continue; }
+                        if k.len() < header_size + 2 {
+                            continue;
+                        }
+                        let member_len =
+                            u16::from_be_bytes(k[header_size..header_size + 2].try_into().unwrap())
+                                as usize;
+                        if k.len() < header_size + 2 + member_len {
+                            continue;
+                        }
                         let member = &k[header_size + 2..header_size + 2 + member_len];
                         let new_sk = encode_set_key(db, dst, member);
                         self.storage.put(new_sk, vec![1u8]);
@@ -3204,10 +3316,16 @@ impl RedisDatabase {
                 let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
                 for (k, v) in entries {
                     if v.is_some() {
-                        if k.len() < base_len + 8 + 2 { continue; }
-                        let score = decode_sortable_double(&k[base_len..base_len+8]);
-                        let member_len = u16::from_be_bytes(k[base_len+8..base_len+10].try_into().unwrap()) as usize;
-                        if k.len() < base_len + 10 + member_len { continue; }
+                        if k.len() < base_len + 8 + 2 {
+                            continue;
+                        }
+                        let score = decode_sortable_double(&k[base_len..base_len + 8]);
+                        let member_len =
+                            u16::from_be_bytes(k[base_len + 8..base_len + 10].try_into().unwrap())
+                                as usize;
+                        if k.len() < base_len + 10 + member_len {
+                            continue;
+                        }
                         let member = &k[base_len + 10..base_len + 10 + member_len];
                         let new_mk = encode_zset_member_key(db, dst, member);
                         let score_bytes = encode_sortable_double(score);
@@ -3234,11 +3352,10 @@ impl RedisDatabase {
     pub fn rename_key(&self, db: usize, src: &[u8], dst: &[u8]) -> Result<(), RedisError> {
         let _guard = self.shard_w_multi(&[src, dst]);
 
-        if !self.is_live_key_inner(db, src) {
-            return Err(RedisError::Other("ERR no such key".to_string()));
-        }
-
-        let src_meta = self.get_meta_inner(db, src).unwrap();
+        let src_meta = match self.get_live_meta_inner(db, src) {
+            None => return Err(RedisError::Other("ERR no such key".to_string())),
+            Some(m) => m,
+        };
 
         if self.is_live_key_inner(db, dst) {
             self.delete_key_internal(db, dst, None);
@@ -3253,15 +3370,15 @@ impl RedisDatabase {
     pub fn renamenx(&self, db: usize, src: &[u8], dst: &[u8]) -> Result<i64, RedisError> {
         let _guard = self.shard_w_multi(&[src, dst]);
 
-        if !self.is_live_key_inner(db, src) {
-            return Err(RedisError::Other("ERR no such key".to_string()));
-        }
+        let src_meta = match self.get_live_meta_inner(db, src) {
+            None => return Err(RedisError::Other("ERR no such key".to_string())),
+            Some(m) => m,
+        };
 
         if self.is_live_key_inner(db, dst) {
             return Ok(0);
         }
 
-        let src_meta = self.get_meta_inner(db, src).unwrap();
         self.rename_data_inner(db, src, dst, &src_meta);
         Ok(1)
     }
@@ -3333,9 +3450,7 @@ impl RedisDatabase {
                         RedisType::List => "list",
                         RedisType::Set => "set",
                         RedisType::ZSet => "zset",
-                        RedisType::None => {
-                            ext_type_registry::get_type(db, key).unwrap_or("none")
-                        }
+                        RedisType::None => ext_type_registry::get_type(db, key).unwrap_or("none"),
                     },
                 };
                 if ktype.to_lowercase() != type_f.to_lowercase() {
@@ -3406,7 +3521,12 @@ impl RedisDatabase {
         Ok(())
     }
 
-    fn collect_key_data(&self, db: usize, key: &[u8], meta: &RedisMetadata) -> Vec<(Vec<u8>, Vec<u8>)> {
+    fn collect_key_data(
+        &self,
+        db: usize,
+        key: &[u8],
+        meta: &RedisMetadata,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut data = Vec::new();
         match meta.r#type {
             RedisType::String => {
@@ -3448,7 +3568,13 @@ impl RedisDatabase {
         data
     }
 
-    fn write_key_data(&self, new_db: usize, key: &[u8], meta: &RedisMetadata, raw_pairs: &[(Vec<u8>, Vec<u8>)]) {
+    fn write_key_data(
+        &self,
+        new_db: usize,
+        key: &[u8],
+        meta: &RedisMetadata,
+        raw_pairs: &[(Vec<u8>, Vec<u8>)],
+    ) {
         // We need to re-encode keys for new_db
         // The raw_pairs have keys encoded for old_db; we need to re-encode for new_db
         // Instead, we re-encode based on type
@@ -3464,9 +3590,15 @@ impl RedisDatabase {
                 // [TAG_HASH:1][old_db:1][keyLen:2BE][key][fieldLen:2BE][field] -> value
                 let header_size = 1 + 1 + 2 + key.len();
                 for (k, v) in raw_pairs {
-                    if k.len() < header_size + 2 { continue; }
-                    let field_len = u16::from_be_bytes(k[header_size..header_size+2].try_into().unwrap()) as usize;
-                    if k.len() < header_size + 2 + field_len { continue; }
+                    if k.len() < header_size + 2 {
+                        continue;
+                    }
+                    let field_len =
+                        u16::from_be_bytes(k[header_size..header_size + 2].try_into().unwrap())
+                            as usize;
+                    if k.len() < header_size + 2 + field_len {
+                        continue;
+                    }
                     let field = &k[header_size + 2..header_size + 2 + field_len];
                     let new_hk = encode_hash_key(new_db, key, field);
                     self.storage.put(new_hk, v.clone());
@@ -3475,8 +3607,11 @@ impl RedisDatabase {
             RedisType::List => {
                 let header_size = 1 + 1 + 2 + key.len();
                 for (k, v) in raw_pairs {
-                    if k.len() < header_size + 8 { continue; }
-                    let seq = i64::from_be_bytes(k[header_size..header_size+8].try_into().unwrap());
+                    if k.len() < header_size + 8 {
+                        continue;
+                    }
+                    let seq =
+                        i64::from_be_bytes(k[header_size..header_size + 8].try_into().unwrap());
                     let new_lk = encode_list_key(new_db, key, seq);
                     self.storage.put(new_lk, v.clone());
                 }
@@ -3484,9 +3619,15 @@ impl RedisDatabase {
             RedisType::Set => {
                 let header_size = 1 + 1 + 2 + key.len();
                 for (k, _v) in raw_pairs {
-                    if k.len() < header_size + 2 { continue; }
-                    let member_len = u16::from_be_bytes(k[header_size..header_size+2].try_into().unwrap()) as usize;
-                    if k.len() < header_size + 2 + member_len { continue; }
+                    if k.len() < header_size + 2 {
+                        continue;
+                    }
+                    let member_len =
+                        u16::from_be_bytes(k[header_size..header_size + 2].try_into().unwrap())
+                            as usize;
+                    if k.len() < header_size + 2 + member_len {
+                        continue;
+                    }
                     let member = &k[header_size + 2..header_size + 2 + member_len];
                     let new_sk = encode_set_key(new_db, key, member);
                     self.storage.put(new_sk, vec![1u8]);
@@ -3497,24 +3638,38 @@ impl RedisDatabase {
                 // Process them both
                 let header_size = 1 + 1 + 2 + key.len();
                 for (k, v) in raw_pairs {
-                    if k.len() < header_size + 1 { continue; }
+                    if k.len() < header_size + 1 {
+                        continue;
+                    }
                     let subtype = k[header_size];
                     if subtype == 0x01 {
                         // member key: ...[0x01][memberLen:2BE][member] -> sortable_score_bytes
                         let rest_start = header_size + 1;
-                        if k.len() < rest_start + 2 { continue; }
-                        let member_len = u16::from_be_bytes(k[rest_start..rest_start+2].try_into().unwrap()) as usize;
-                        if k.len() < rest_start + 2 + member_len { continue; }
+                        if k.len() < rest_start + 2 {
+                            continue;
+                        }
+                        let member_len =
+                            u16::from_be_bytes(k[rest_start..rest_start + 2].try_into().unwrap())
+                                as usize;
+                        if k.len() < rest_start + 2 + member_len {
+                            continue;
+                        }
                         let member = &k[rest_start + 2..rest_start + 2 + member_len];
                         let new_mk = encode_zset_member_key(new_db, key, member);
                         self.storage.put(new_mk, v.clone());
                     } else if subtype == 0x02 {
                         // score key: ...[0x02][score:8][memberLen:2BE][member] -> [1u8]
                         let rest_start = header_size + 1;
-                        if k.len() < rest_start + 8 + 2 { continue; }
-                        let score = decode_sortable_double(&k[rest_start..rest_start+8]);
-                        let member_len = u16::from_be_bytes(k[rest_start+8..rest_start+10].try_into().unwrap()) as usize;
-                        if k.len() < rest_start + 10 + member_len { continue; }
+                        if k.len() < rest_start + 8 + 2 {
+                            continue;
+                        }
+                        let score = decode_sortable_double(&k[rest_start..rest_start + 8]);
+                        let member_len = u16::from_be_bytes(
+                            k[rest_start + 8..rest_start + 10].try_into().unwrap(),
+                        ) as usize;
+                        if k.len() < rest_start + 10 + member_len {
+                            continue;
+                        }
                         let member = &k[rest_start + 10..rest_start + 10 + member_len];
                         let new_sk = encode_zset_score_key(new_db, key, score, member);
                         self.storage.put(new_sk, vec![1u8]);
@@ -3541,7 +3696,9 @@ impl RedisDatabase {
     }
 
     pub fn zintercard(&self, db: usize, keys: &[&[u8]], limit: i64) -> Result<i64, RedisError> {
-        if keys.is_empty() { return Ok(0); }
+        if keys.is_empty() {
+            return Ok(0);
+        }
         let first_members: std::collections::HashSet<Vec<u8>> = match self.zrange_all(db, keys[0]) {
             Ok(items) => items.into_iter().map(|(m, _)| m).collect(),
             Err(_) => return Ok(0),
@@ -3553,13 +3710,25 @@ impl RedisDatabase {
                 Err(_) => return Ok(0),
             };
             intersection = intersection.intersection(&members).cloned().collect();
-            if intersection.is_empty() { return Ok(0); }
+            if intersection.is_empty() {
+                return Ok(0);
+            }
         }
         let count = intersection.len() as i64;
-        if limit > 0 && count > limit { Ok(limit) } else { Ok(count) }
+        if limit > 0 && count > limit {
+            Ok(limit)
+        } else {
+            Ok(count)
+        }
     }
 
-    pub fn lmpop_impl(&self, db: usize, keys: &[&[u8]], from_left: bool, count: usize) -> Result<Option<(Vec<u8>, Vec<Vec<u8>>)>, RedisError> {
+    pub fn lmpop_impl(
+        &self,
+        db: usize,
+        keys: &[&[u8]],
+        from_left: bool,
+        count: usize,
+    ) -> Result<Option<(Vec<u8>, Vec<Vec<u8>>)>, RedisError> {
         for key in keys {
             let items = if from_left {
                 self.lpop_count(db, key, count)?
@@ -3573,7 +3742,13 @@ impl RedisDatabase {
         Ok(None)
     }
 
-    pub fn zpop_multi(&self, db: usize, keys: &[&[u8]], pop_min: bool, count: i64) -> Result<Option<(Vec<u8>, Vec<(Vec<u8>, f64)>)>, RedisError> {
+    pub fn zpop_multi(
+        &self,
+        db: usize,
+        keys: &[&[u8]],
+        pop_min: bool,
+        count: i64,
+    ) -> Result<Option<(Vec<u8>, Vec<(Vec<u8>, f64)>)>, RedisError> {
         for key in keys {
             let items = if pop_min {
                 self.zpopmin(db, key, count)?
@@ -3653,16 +3828,15 @@ impl RedisDatabase {
             return Err(RedisError::Other("ERR invalid DB index".to_string()));
         }
 
-        if !self.is_live_key_inner(src_db, key) {
-            return Ok(0);
-        }
+        let meta = match self.get_live_meta_inner(src_db, key) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
 
         // Fail if key exists in dst
         if self.is_live_key_inner(dst_db, key) {
             return Ok(0);
         }
-
-        let meta = self.get_meta_inner(src_db, key).unwrap();
         let data = self.collect_key_data(src_db, key, &meta);
         self.write_key_data(dst_db, key, &meta, &data);
         self.delete_key_internal(src_db, key, Some(&meta));
@@ -3671,16 +3845,24 @@ impl RedisDatabase {
     }
 
     /// COPY src dst [DB destination] [REPLACE] - copies a key
-    pub fn copy_key(&self, src_db: usize, src: &[u8], dst_db: usize, dst: &[u8], replace: bool) -> Result<i64, RedisError> {
+    pub fn copy_key(
+        &self,
+        src_db: usize,
+        src: &[u8],
+        dst_db: usize,
+        dst: &[u8],
+        replace: bool,
+    ) -> Result<i64, RedisError> {
         let _guard = self.shard_w_multi(&[src, dst]);
 
         if src_db >= self.num_dbs || dst_db >= self.num_dbs {
             return Err(RedisError::Other("ERR invalid DB index".to_string()));
         }
 
-        if !self.is_live_key_inner(src_db, src) {
-            return Ok(0);
-        }
+        let meta = match self.get_live_meta_inner(src_db, src) {
+            None => return Ok(0),
+            Some(m) => m,
+        };
 
         if self.is_live_key_inner(dst_db, dst) {
             if !replace {
@@ -3688,8 +3870,6 @@ impl RedisDatabase {
             }
             self.delete_key_internal(dst_db, dst, None);
         }
-
-        let meta = self.get_meta_inner(src_db, src).unwrap();
         let data = self.collect_key_data(src_db, src, &meta);
         self.write_key_data(dst_db, dst, &meta, &data);
 
@@ -3697,14 +3877,17 @@ impl RedisDatabase {
     }
 
     /// SORT key - sorts a list/set/zset numerically
-    pub fn sort_key(&self, db: usize, key: &[u8], alpha: bool, desc: bool, limit: Option<(i64, i64)>) -> Result<Vec<Vec<u8>>, RedisError> {
+    pub fn sort_key(
+        &self,
+        db: usize,
+        key: &[u8],
+        alpha: bool,
+        desc: bool,
+        limit: Option<(i64, i64)>,
+    ) -> Result<Vec<Vec<u8>>, RedisError> {
         let _guard = self.shard_r(key);
 
-        if !self.is_live_key_inner(db, key) {
-            return Ok(vec![]);
-        }
-
-        let meta = match self.get_meta_inner(db, key) {
+        let meta = match self.get_live_meta_inner(db, key) {
             None => return Ok(vec![]),
             Some(m) => m,
         };
@@ -3719,8 +3902,11 @@ impl RedisDatabase {
                 let mut pairs: Vec<(i64, Vec<u8>)> = Vec::new();
                 for (k, v) in entries {
                     if let Some(v) = v {
-                        if k.len() < header_size + 8 { continue; }
-                        let seq = i64::from_be_bytes(k[header_size..header_size+8].try_into().unwrap());
+                        if k.len() < header_size + 8 {
+                            continue;
+                        }
+                        let seq =
+                            i64::from_be_bytes(k[header_size..header_size + 8].try_into().unwrap());
                         pairs.push((seq, v));
                     }
                 }
@@ -3736,7 +3922,9 @@ impl RedisDatabase {
                 let mut result = Vec::new();
                 for (k, v) in entries {
                     if v.is_some() && k.len() >= header_size + 2 {
-                        let member_len = u16::from_be_bytes(k[header_size..header_size+2].try_into().unwrap()) as usize;
+                        let member_len =
+                            u16::from_be_bytes(k[header_size..header_size + 2].try_into().unwrap())
+                                as usize;
                         if k.len() >= header_size + 2 + member_len {
                             result.push(k[header_size + 2..header_size + 2 + member_len].to_vec());
                         }
@@ -3753,9 +3941,14 @@ impl RedisDatabase {
                 let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
                 let mut result = Vec::new();
                 for (k, _v) in entries {
-                    if k.len() < base_len + 2 { continue; }
-                    let member_len = u16::from_be_bytes(k[base_len..base_len+2].try_into().unwrap()) as usize;
-                    if k.len() < base_len + 2 + member_len { continue; }
+                    if k.len() < base_len + 2 {
+                        continue;
+                    }
+                    let member_len =
+                        u16::from_be_bytes(k[base_len..base_len + 2].try_into().unwrap()) as usize;
+                    if k.len() < base_len + 2 + member_len {
+                        continue;
+                    }
                     result.push(k[base_len + 2..base_len + 2 + member_len].to_vec());
                 }
                 result
@@ -3768,8 +3961,14 @@ impl RedisDatabase {
             items.sort_by(|a, b| a.cmp(b));
         } else {
             items.sort_by(|a, b| {
-                let fa = std::str::from_utf8(a).ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let fb = std::str::from_utf8(b).ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let fa = std::str::from_utf8(a)
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let fb = std::str::from_utf8(b)
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
@@ -3786,7 +3985,11 @@ impl RedisDatabase {
             } else {
                 (start + count as usize).min(items.len())
             };
-            items = if start < items.len() { items[start..end].to_vec() } else { vec![] };
+            items = if start < items.len() {
+                items[start..end].to_vec()
+            } else {
+                vec![]
+            };
         }
 
         Ok(items)

@@ -68,6 +68,10 @@ impl MemTable {
             .collect()
     }
 
+    pub fn snapshot(&self) -> BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+        self.data.clone()
+    }
+
     pub fn into_snapshot(self) -> BTreeMap<Vec<u8>, Option<Vec<u8>>> {
         self.data
     }

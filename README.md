@@ -12,19 +12,88 @@ docker pull forgekv/forgekv
 
 Redis is single-threaded by design. It saturates one core and tops out around 80–90K ops/sec regardless of how many cores your machine has.
 
-ForgeKV uses a **64-shard lock architecture** — each shard has its own WAL, memtable, and RwLock. Concurrent writers never block each other unless they hash to the same shard. The result: throughput scales with the number of client threads.
+ForgeKV uses a **256-shard lock architecture** — each shard has its own WAL, memtable, and RwLock. Concurrent writers never block each other unless they hash to the same shard. The result: throughput scales with the number of client threads.
 
 ---
 
-## Benchmark — ForgeKV vs Redis 7 vs Dragonfly
+## Benchmark v2 — ForgeKV vs Redis 7 vs Dragonfly
 
-**Setup:** `memtier_benchmark`, pipeline=16, 64-byte values, 20s per config.
+**Setup:** `memtier_benchmark`, `--network host`, pipeline=16, 64-byte values, 20s per config.
 `t` = benchmark threads, `c` = clients per thread.
 
 ### SET throughput (ops/sec — higher is better)
 
-| Config | ForgeKV | Redis 7 | Dragonfly | vs Redis | vs Dragonfly |
-|--------|--------:|--------:|----------:|---------:|-------------:|
+| Config | ForgeKV v2 | Redis 7 | Dragonfly | vs Redis | vs Dragonfly |
+|--------|----------:|--------:|----------:|---------:|-------------:|
+| t=1 c=10 | 452,721 | 451,023 | 144,726 | **100%** | **313%** |
+| t=1 c=20 | 476,677 | 527,199 | 207,407 | 90% | **230%** |
+| t=2 c=10 | **908,408** | 693,045 | 354,091 | **131%** | **257%** |
+| t=2 c=20 | **955,010** | 756,600 | 408,084 | **126%** | **234%** |
+| t=4 c=10 | **1,542,005** | 525,048 | 592,571 | **294%** | **260%** |
+| t=4 c=50 | **1,452,569** | 618,241 | 760,924 | **235%** | **191%** |
+
+### GET throughput (ops/sec — higher is better)
+
+| Config | ForgeKV v2 | Redis 7 | Dragonfly | vs Redis | vs Dragonfly |
+|--------|----------:|--------:|----------:|---------:|-------------:|
+| t=1 c=10 | 524,635 | 762,926 | 133,016 | 69% | **394%** |
+| t=1 c=20 | 570,173 | 730,880 | 232,198 | 78% | **246%** |
+| t=2 c=10 | **1,108,087** | 736,096 | 381,827 | **150%** | **290%** |
+| t=2 c=20 | **1,226,648** | 837,285 | 484,340 | **147%** | **253%** |
+| t=4 c=10 | **1,962,310** | 548,393 | 668,289 | **358%** | **294%** |
+| t=4 c=50 | **1,171,594** | 627,456 | 887,687 | **187%** | **132%** |
+
+### SET p50 latency ms (lower is better)
+
+| Config | ForgeKV v2 | Redis 7 | Dragonfly |
+|--------|----------:|--------:|----------:|
+| t=1 c=10 | 0.343 | 0.303 | 0.703 |
+| t=1 c=20 | 0.663 | 0.567 | 1.263 |
+| t=2 c=10 | **0.367** | 0.503 | 0.911 |
+| t=2 c=20 | **0.727** | 0.863 | 1.767 |
+| t=4 c=10 | **0.439** | 1.295 | 1.295 |
+| t=4 c=50 | **2.271** | 5.311 | 4.127 |
+
+### SET p99 latency ms (lower is better)
+
+| Config | ForgeKV v2 | Redis 7 | Dragonfly |
+|--------|----------:|--------:|----------:|
+| t=1 c=10 | 0.84 | 0.61 | 4.13 |
+| t=1 c=20 | 1.23 | 1.01 | 4.70 |
+| t=2 c=10 | 1.06 | 0.82 | 6.27 |
+| t=2 c=20 | **1.50** | 1.53 | 9.02 |
+| t=4 c=10 | **1.14** | 2.43 | 10.43 |
+| t=4 c=50 | **4.77** | 9.22 | 28.03 |
+
+> `vs Redis / vs Dragonfly` = ForgeKV ÷ competitor × 100%. For throughput: above 100% = ForgeKV wins. For latency: below 100% = ForgeKV wins.
+
+### What changed in v2
+
+1. **256-shard architecture** (was 64) — reduced lock contention at high concurrency
+2. **Eliminated redundant metadata reads** — `save_meta_inner` no longer re-reads from storage; new `get_live_meta_inner` replaces the double-lookup pattern across 70+ call sites
+3. **Batched writes for LPUSH/RPUSH/HSET/SADD** — single WAL+memtable lock acquisition instead of N separate locks per element
+
+### Summary
+
+- **SET single-thread** (t=1): ForgeKV matches Redis 7 within 10% and is **2.3–3.1x faster** than Dragonfly.
+- **SET multi-thread** (t=4 c=10): **1.54M SET/s** — 2.9x Redis 7, 2.6x Dragonfly.
+- **GET multi-thread** (t=4 c=10): **1.96M GET/s** — 3.6x Redis 7, 2.9x Dragonfly.
+- **High concurrency** (t=4 c=50): **1.45M SET/s** and **1.17M GET/s** — both faster than Redis 7 and Dragonfly. In v1 this config was the weak point (73% of Redis SET); now it's a strength.
+- **Tail latency**: SET p99 at t=4 c=50 is **4.8ms** — 1.9x better than Redis 7 (9.2ms), 5.9x better than Dragonfly (28.0ms).
+
+---
+
+### Benchmark v1 (historical) — ForgeKV vs Redis 7 vs Dragonfly
+
+<details>
+<summary>Click to expand v1 results</summary>
+
+**Setup:** `memtier_benchmark`, pipeline=16, 64-byte values, 20s per config.
+
+#### SET throughput (ops/sec)
+
+| Config | ForgeKV v1 | Redis 7 | Dragonfly | vs Redis | vs Dragonfly |
+|--------|----------:|--------:|----------:|---------:|-------------:|
 | t=1 c=10 | 69,143 | 80,704 | 23,067 | 86% | **300%** |
 | t=1 c=20 | 76,868 | 85,538 | 26,398 | 90% | **291%** |
 | t=2 c=10 | **147,992** | 96,279 | 39,477 | **154%** | **375%** |
@@ -32,21 +101,10 @@ ForgeKV uses a **64-shard lock architecture** — each shard has its own WAL, me
 | t=4 c=10 | **100,175** | 61,171 | 61,384 | **164%** | **163%** |
 | t=4 c=50 | 59,401 | 81,660 | 94,665 | 73% | 63% |
 
-### Average latency ms (lower is better)
+#### p99 latency ms
 
-| Config | ForgeKV | Redis 7 | Dragonfly |
-|--------|--------:|--------:|----------:|
-| t=1 c=10 | 0.222 | 0.179 | 0.659 |
-| t=1 c=20 | 0.379 | 0.339 | 1.104 |
-| t=2 c=10 | **0.195** | 0.316 | 0.765 |
-| t=2 c=20 | **0.367** | 0.546 | 1.273 |
-| t=4 c=10 | **0.577** | 0.903 | 0.940 |
-| t=4 c=50 | 4.896 | 3.563 | 3.056 |
-
-### p99 latency ms (lower is better)
-
-| Config | ForgeKV | Redis 7 | Dragonfly |
-|--------|--------:|--------:|----------:|
+| Config | ForgeKV v1 | Redis 7 | Dragonfly |
+|--------|----------:|--------:|----------:|
 | t=1 c=10 | 0.85 | 0.84 | 5.18 |
 | t=1 c=20 | 1.59 | 1.38 | 6.24 |
 | t=2 c=10 | 1.09 | 1.02 | 4.80 |
@@ -54,12 +112,7 @@ ForgeKV uses a **64-shard lock architecture** — each shard has its own WAL, me
 | t=4 c=10 | 2.90 | 2.67 | 7.10 |
 | t=4 c=50 | 17.28 | 11.97 | 27.77 |
 
-> `vs Redis / vs Dragonfly` = ForgeKV ÷ competitor × 100%. Values above 100% mean ForgeKV wins.
-
-**Summary:**
-- At **t=2 c=20** (40 concurrent connections, 2 cores) ForgeKV delivers **158K SET/s** — 41% faster than Redis 7 and 3.5× faster than Dragonfly.
-- ForgeKV **scales with cores**. Redis 7 plateaus; ForgeKV keeps climbing as you add benchmark threads.
-- High-concurrency extreme (t=4 c=50, 200 connections) is the current weak point — targeted by the upcoming group-commit WAL optimization.
+</details>
 
 ---
 
@@ -72,18 +125,19 @@ Client connections (Tokio async, 1 task per connection)
    Command Registry
          │
          ▼
-  RedisDatabase  ─── 64 FNV-1a shards (RwLock each)
+  RedisDatabase  ─── 256 FNV-1a shards (RwLock each)
          │
          ▼
-  LsmStorage  ─── 64-shard WAL  +  64-shard MemTable (BTreeMap)
+  LsmStorage  ─── 256-shard WAL  +  256-shard MemTable (BTreeMap)
          │                              │
          ▼                              ▼
   SSTable files (SSD)          Immutable snapshots → flush
 ```
 
-- **64-shard WAL**: Each shard writes to its own `wal-XX.bin` file with a 256KB BufWriter. WAL rotation is atomic — the WAL lock is held during both rotation and memtable snapshot.
-- **put2**: `SET` writes two entries (meta + data) in a single WAL lock acquisition and a single memtable lock — no extra round-trips.
+- **256-shard WAL**: Each shard writes to its own WAL file with a 256KB BufWriter. WAL rotation is atomic — the WAL lock is held during both rotation and memtable snapshot.
+- **put2 / put_batch**: `SET` writes two entries (meta + data) in a single lock. `LPUSH`, `HSET`, `SADD` batch all elements + meta into one `put_batch` call — single WAL+memtable lock acquisition regardless of element count.
 - **Redis key-aware sharding**: `shard_of()` strips the internal storage prefix before hashing, so meta and data keys for the same Redis key always land in the same shard.
+- **Zero redundant reads**: `get_live_meta_inner` combines existence check + metadata fetch in a single storage read, eliminating the double-lookup pattern across all commands.
 - **Blocking commands**: `BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN/MAX` use a Tokio broadcast channel per `(db, key)`.
 
 ---

@@ -8,20 +8,27 @@ use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::config::ServerConfig;
 use super::compaction::Compaction;
-use super::key_encoding::{TAG_META, TAG_STRING, TAG_HASH, TAG_LIST, TAG_SET, TAG_ZSET, TAG_TTL};
+use super::key_encoding::{TAG_HASH, TAG_LIST, TAG_META, TAG_SET, TAG_STRING, TAG_TTL, TAG_ZSET};
 use super::manifest::Manifest;
 use super::memtable::MemTable;
 use super::sstable::SSTableWriter;
 use super::wal::{WalOpType, WriteAheadLog};
+use crate::config::ServerConfig;
 
-const NUM_SHARDS: usize = 64;
+const NUM_SHARDS: usize = 256;
 
 /// Per-shard memtable state (active + one immutable slot).
 struct MemShard {
     active: MemTable,
     immutable: Option<MemTable>,
+    immutable_flushing: bool,
+}
+
+struct FlushPlan {
+    shard: usize,
+    snapshot: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    archive: Option<std::path::PathBuf>,
 }
 
 pub struct LsmStorage {
@@ -51,12 +58,20 @@ pub struct LsmStorage {
 #[inline]
 fn shard_of(key: &[u8]) -> usize {
     let payload: &[u8] = match key.first().copied() {
-        Some(TAG_META) | Some(TAG_STRING) | Some(TAG_HASH)
-        | Some(TAG_LIST) | Some(TAG_SET) | Some(TAG_ZSET) => {
-            if key.len() > 4 { &key[4..] } else { key }
+        Some(TAG_META) | Some(TAG_STRING) | Some(TAG_HASH) | Some(TAG_LIST) | Some(TAG_SET)
+        | Some(TAG_ZSET) => {
+            if key.len() > 4 {
+                &key[4..]
+            } else {
+                key
+            }
         }
         Some(TAG_TTL) => {
-            if key.len() > 13 { &key[13..] } else { key }
+            if key.len() > 13 {
+                &key[13..]
+            } else {
+                key
+            }
         }
         _ => key,
     };
@@ -112,6 +127,7 @@ impl LsmStorage {
                 RwLock::new(MemShard {
                     active: MemTable::new(memtable_shard_bytes),
                     immutable: None,
+                    immutable_flushing: false,
                 })
             })
             .collect();
@@ -137,10 +153,14 @@ impl LsmStorage {
         };
 
         // Flush any recovered data to L0
-        let any_data = storage.mem_shards.iter().any(|s| s.read().active.count() > 0);
+        let any_data = storage
+            .mem_shards
+            .iter()
+            .any(|s| s.read().active.count() > 0);
         if any_data {
             storage.force_flush()?;
         }
+        Self::cleanup_archived_wals(&data_dir)?;
 
         // Start background compaction thread
         let bg_stop = storage.bg_stop.clone();
@@ -157,9 +177,9 @@ impl LsmStorage {
         Ok(storage)
     }
 
-    /// Collect all WAL entries from active WAL files, sorted by global sequence.
-    /// Active files: "current.wal" (old format) + "wal-{NN}.wal" (new format).
-    /// Archives ("archive-*.wal") are already in SSTables — skip them.
+    /// Collect all WAL entries that must be replayed, sorted by global sequence.
+    /// This includes active WALs and archived rotation files that may exist if
+    /// the server crashed after rotating but before the SSTable flush finished.
     fn recover_wal_entries(
         data_dir: &PathBuf,
     ) -> io::Result<(Vec<(u64, WalOpType, Vec<u8>, Vec<u8>)>, u64)> {
@@ -167,12 +187,10 @@ impl LsmStorage {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
-                if p.extension().map(|e| e == "wal").unwrap_or(false) {
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    name == "current.wal" || name.starts_with("wal-")
-                } else {
-                    false
-                }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                (p.extension().map(|e| e == "wal").unwrap_or(false)
+                    && (name == "current.wal" || name.starts_with("wal-")))
+                    || (name.starts_with("archive-") && name.ends_with(".wal.bak"))
             })
             .collect();
 
@@ -184,6 +202,20 @@ impl LsmStorage {
 
         let max_seq = all_entries.iter().map(|(s, _, _, _)| *s).max().unwrap_or(0);
         Ok((all_entries, max_seq))
+    }
+
+    fn cleanup_archived_wals(data_dir: &PathBuf) -> io::Result<()> {
+        for path in fs::read_dir(data_dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.starts_with("archive-") && name.ends_with(".wal.bak")
+            })
+        {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
     }
 
     /// Rename active WAL files so fresh ones can be created.
@@ -216,7 +248,8 @@ impl LsmStorage {
     /// Uses the current global sequence so each archive name is unique.
     fn wal_archive_path(&self, shard: usize) -> std::path::PathBuf {
         let seq = self.wal_seq.load(Ordering::Relaxed);
-        self.data_dir.join(format!("archive-wal-{:02}-{}.wal.bak", shard, seq))
+        self.data_dir
+            .join(format!("archive-wal-{:02}-{}.wal.bak", shard, seq))
     }
 
     /// Called while holding BOTH the WAL mutex and the shard write lock.
@@ -234,34 +267,59 @@ impl LsmStorage {
         shard: usize,
         wal: &mut WriteAheadLog,
         mem: &mut MemShard,
-    ) -> (Option<BTreeMap<Vec<u8>, Option<Vec<u8>>>>, Option<std::path::PathBuf>) {
+    ) -> Option<FlushPlan> {
         if !mem.active.is_full() {
-            return (None, None);
+            return None;
         }
 
-        // Immutable slot occupied — flush it; WAL for it was already rotated.
-        if let Some(imm) = mem.immutable.take() {
-            return (Some(imm.into_snapshot()), None);
+        // Immutable slot occupied — keep it readable while a single flush is in flight.
+        if let Some(imm) = mem.immutable.as_ref() {
+            if mem.immutable_flushing {
+                return None;
+            }
+            mem.immutable_flushing = true;
+            return Some(FlushPlan {
+                shard,
+                snapshot: imm.snapshot(),
+                archive: None,
+            });
         }
 
         // Rotate WAL atomically with memtable snapshot.
         let archive = self.wal_archive_path(shard);
-        let _ = wal.rotate(&archive);
+        if wal.rotate(&archive).is_err() {
+            return None;
+        }
         let new_active = MemTable::new(self.memtable_shard_bytes);
         let old = std::mem::replace(&mut mem.active, new_active);
-        (Some(old.into_snapshot()), Some(archive))
+        mem.immutable = Some(old);
+        mem.immutable_flushing = true;
+        Some(FlushPlan {
+            shard,
+            snapshot: mem
+                .immutable
+                .as_ref()
+                .expect("immutable just assigned")
+                .snapshot(),
+            archive: Some(archive),
+        })
     }
 
     /// If a snapshot was produced by rotation, flush it to L0 and clean up the archive.
-    fn flush_if_needed(
-        &self,
-        snap: Option<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
-        archive: Option<std::path::PathBuf>,
-    ) {
-        if let Some(s) = snap {
-            let _ = self.flush_snapshot_to_l0(s);
-            if let Some(path) = archive {
-                let _ = fs::remove_file(path);
+    fn flush_if_needed(&self, plan: Option<FlushPlan>) {
+        if let Some(plan) = plan {
+            let flush_ok = self.flush_snapshot_to_l0(plan.snapshot).is_ok();
+            {
+                let mut mem = self.mem_shards[plan.shard].write();
+                if flush_ok {
+                    mem.immutable = None;
+                }
+                mem.immutable_flushing = false;
+            }
+            if flush_ok {
+                if let Some(path) = plan.archive {
+                    let _ = fs::remove_file(path);
+                }
             }
         }
     }
@@ -279,14 +337,13 @@ impl LsmStorage {
             shard_indices[shard_of(k)].push(i);
         }
 
-        let mut to_flush: Vec<(BTreeMap<Vec<u8>, Option<Vec<u8>>>, Option<std::path::PathBuf>)> =
-            Vec::new();
+        let mut to_flush: Vec<FlushPlan> = Vec::new();
 
         for (shard, indices) in shard_indices.iter().enumerate() {
             if indices.is_empty() {
                 continue;
             }
-            let pair = {
+            let plan = {
                 let mut wal = self.wals[shard].lock();
                 for &i in indices {
                     let (k, v) = &entries[i];
@@ -299,13 +356,13 @@ impl LsmStorage {
                 }
                 self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
             };
-            if let (Some(snap), archive) = pair {
-                to_flush.push((snap, archive));
+            if let Some(plan) = plan {
+                to_flush.push(plan);
             }
         }
 
-        for (snap, archive) in to_flush {
-            self.flush_if_needed(Some(snap), archive);
+        for plan in to_flush {
+            self.flush_if_needed(Some(plan));
         }
     }
 
@@ -316,15 +373,14 @@ impl LsmStorage {
     /// prefix), the meta key and string-data key for the same logical Redis key
     /// always map to the same shard.  This gives put2 the same lock overhead as
     /// a single put() — half the cost of two independent put() calls.
-    pub fn put2(
-        &self,
-        key1: Vec<u8>, val1: Vec<u8>,
-        key2: Vec<u8>, val2: Vec<u8>,
-    ) {
+    pub fn put2(&self, key1: Vec<u8>, val1: Vec<u8>, key2: Vec<u8>, val2: Vec<u8>) {
         let shard = shard_of(&key1);
-        debug_assert_eq!(shard, shard_of(&key2),
-            "put2: keys must map to the same shard (same Redis key, different tags)");
-        let (snap, archive) = {
+        debug_assert_eq!(
+            shard,
+            shard_of(&key2),
+            "put2: keys must map to the same shard (same Redis key, different tags)"
+        );
+        let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Put, &key1, &val1);
             let _ = wal.append(WalOpType::Put, &key2, &val2);
@@ -333,31 +389,31 @@ impl LsmStorage {
             mem.active.put(key2, val2);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(snap, archive);
+        self.flush_if_needed(plan);
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
         let shard = shard_of(&key);
-        let (snap, archive) = {
+        let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Put, &key, &value);
             let mut mem = self.mem_shards[shard].write();
             mem.active.put(key, value);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(snap, archive);
+        self.flush_if_needed(plan);
     }
 
     pub fn delete(&self, key: Vec<u8>) {
         let shard = shard_of(&key);
-        let (snap, archive) = {
+        let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Delete, &key, &[]);
             let mut mem = self.mem_shards[shard].write();
             mem.active.delete(key);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(snap, archive);
+        self.flush_if_needed(plan);
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -428,10 +484,7 @@ impl LsmStorage {
         Ok(())
     }
 
-    fn flush_snapshot_to_l0(
-        &self,
-        snapshot: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    ) -> io::Result<()> {
+    fn flush_snapshot_to_l0(&self, snapshot: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> io::Result<()> {
         if snapshot.is_empty() {
             return Ok(());
         }
@@ -454,5 +507,52 @@ impl LsmStorage {
             let mut w = wal.lock();
             let _ = w.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LsmStorage;
+    use crate::storage::wal::{WalOpType, WriteAheadLog};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("forgekv-{name}-{unique}"));
+        fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    #[test]
+    fn recover_wal_entries_replays_archived_rotation_files() {
+        let dir = temp_dir("wal-recovery");
+        let wal_path = dir.join("wal-00.wal");
+        let archive_path = dir.join("archive-wal-00-1.wal.bak");
+
+        {
+            let seq = Arc::new(AtomicU64::new(0));
+            let mut wal = WriteAheadLog::new(&wal_path, true, seq).expect("wal should be created");
+            wal.append(WalOpType::Put, b"key", b"value")
+                .expect("wal append should succeed");
+            wal.rotate(&archive_path)
+                .expect("wal rotation should succeed");
+        }
+
+        let (entries, max_seq) =
+            LsmStorage::recover_wal_entries(&dir).expect("recovery should succeed");
+
+        assert_eq!(max_seq, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].2, b"key");
+        assert_eq!(entries[0].3, b"value");
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }
 }
