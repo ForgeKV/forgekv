@@ -91,8 +91,10 @@ impl LsmStorage {
         fs::create_dir_all(&data_dir)?;
 
         // Divide total memtable budget equally across shards.
+        // Floor at 8MB/shard so L0 flushes are not tiny (~256KB) SST storms.
+        // With 256 shards, 8MB × 256 ≈ 2GB total memtable ceiling when configured high.
         let total_bytes = (config.memtable_size_mb * 1024 * 1024) as usize;
-        let memtable_shard_bytes = (total_bytes / NUM_SHARDS).max(1024 * 1024);
+        let memtable_shard_bytes = (total_bytes / NUM_SHARDS).max(8 * 1024 * 1024);
 
         let write_through = config.wal_sync_mode == crate::config::WalSyncMode::Always;
 
@@ -162,12 +164,12 @@ impl LsmStorage {
         }
         Self::cleanup_archived_wals(&data_dir)?;
 
-        // Start background compaction thread
+        // Start background compaction thread (1s tick; maybe_compact is single-flight)
         let bg_stop = storage.bg_stop.clone();
         let bg_compaction = compaction.clone();
         std::thread::spawn(move || {
             while !bg_stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_secs(5));
+                std::thread::sleep(Duration::from_secs(1));
                 if !bg_stop.load(Ordering::Relaxed) {
                     bg_compaction.maybe_compact();
                 }
@@ -494,8 +496,16 @@ impl LsmStorage {
         let path = self.data_dir.join(&filename);
 
         SSTableWriter::write(&path, &snapshot)?;
+        // Skip empty SSTs (should not happen for non-empty snapshot, but guard disk)
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+            let _ = fs::remove_file(&path);
+            return Ok(());
+        }
         self.manifest.add_file(0, filename);
         self.manifest.save()?;
+
+        // Kick compaction promptly so L0 cannot race ahead of the bg ticker.
+        self.compaction.maybe_compact();
 
         Ok(())
     }
