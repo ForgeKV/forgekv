@@ -89,6 +89,26 @@ impl Compaction {
     }
 
     fn compact_once(&self) -> bool {
+        // If L1 is massively oversized, promote it first so L0→L1 cannot
+        // keep rewriting against a 10k-file L1 forever.
+        {
+            let l1 = self.manifest.get_level(1);
+            if l1.len() > 512 {
+                let total_size: u64 = l1
+                    .iter()
+                    .filter_map(|f| {
+                        std::fs::metadata(self.data_dir.join(f))
+                            .ok()
+                            .map(|m| m.len())
+                    })
+                    .sum();
+                if total_size > LEVEL_MAX_BYTES[1] || l1.len() > 1024 {
+                    self.compact_level_to_next(1, l1);
+                    return true;
+                }
+            }
+        }
+
         let l0_files = self.manifest.get_level(0);
         if l0_files.len() >= L0_THRESHOLD {
             let batch: Vec<String> = l0_files.into_iter().take(L0_COMPACT_BATCH).collect();
@@ -188,8 +208,27 @@ impl Compaction {
             return;
         }
         let merged = self.merge_files(&l0_files);
-        // Also merge with existing L1 files that overlap
-        let l1_files = self.manifest.get_level(1);
+
+        // Never merge the entire L1 set when it is huge — that stalls forever
+        // (15k tiny SSTs × full rewrite was the production failure mode).
+        // Cap L1 inputs; remaining L1 is drained by compact_level_to_next.
+        const MAX_L1_MERGE: usize = 64;
+        let l1_all = self.manifest.get_level(1);
+        let l1_files: Vec<String> = if l1_all.len() > MAX_L1_MERGE {
+            // Prefer a small newest slice; L0 still wins on key overwrite.
+            l1_all
+                .iter()
+                .rev()
+                .take(MAX_L1_MERGE)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        } else {
+            l1_all
+        };
+
         let merged = if !l1_files.is_empty() {
             let mut all_merged = self.merge_files(&l1_files);
             // L0 wins over L1
@@ -215,7 +254,7 @@ impl Compaction {
         for f in &l0_files {
             self.manifest.remove_file(0, f);
         }
-        // Remove L1 files
+        // Remove only the L1 files we actually merged
         for f in &l1_files {
             self.manifest.remove_file(1, f);
         }
