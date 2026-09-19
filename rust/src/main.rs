@@ -413,6 +413,7 @@ fn register_all(
         config: Arc::new(cfg_snap.clone()),
     }));
     registry.register(Arc::new(DbSizeCommand { db: db.clone() }));
+    registry.register(Arc::new(CompactCommand { db: db.clone() }));
     registry.register(Arc::new(CommandCommand));
     registry.register(Arc::new(EchoCommand));
     registry.register(Arc::new(ConfigCommand {

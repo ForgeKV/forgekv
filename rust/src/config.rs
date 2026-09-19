@@ -185,7 +185,7 @@ impl Default for ServerConfig {
             dir: "./data".to_string(),
             dbfilename: "dump.rdb".to_string(),
             databases: 16,
-            memtable_size_mb: 512,
+            memtable_size_mb: 2048,
             wal_sync_mode: WalSyncMode::Everysec,
             repl_backlog_size: 1048576,
             repl_diskless_sync: true,

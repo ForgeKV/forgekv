@@ -35,6 +35,8 @@ pub struct Compaction {
     open_readers: RwLock<HashMap<String, Arc<SSTableReader>>>,
     /// Prevent overlapping compaction passes (bg thread + post-flush).
     compacting: AtomicBool,
+    /// Set by flush worker; bg compaction thread clears and runs.
+    compact_requested: AtomicBool,
 }
 
 impl Compaction {
@@ -44,6 +46,7 @@ impl Compaction {
             manifest,
             open_readers: RwLock::new(HashMap::new()),
             compacting: AtomicBool::new(false),
+            compact_requested: AtomicBool::new(false),
         }
     }
 
@@ -78,14 +81,33 @@ impl Compaction {
         {
             return;
         }
-        // Drain while work remains, but bound iterations so writers aren't starved.
-        for _ in 0..8 {
+        // Drain while work remains, but bound iterations so writers aren't starved
+        // of disk bandwidth. Prefer shorter bursts under write load.
+        for _ in 0..4 {
             let did_work = self.compact_once();
             if !did_work {
                 break;
             }
         }
         self.compacting.store(false, Ordering::SeqCst);
+    }
+
+    /// Ask the compaction thread to run soon (non-blocking).
+    pub fn request_compact(&self) {
+        self.compact_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_compact_request(&self) -> bool {
+        self.compact_requested.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn is_compacting(&self) -> bool {
+        self.compacting.load(Ordering::Relaxed)
+    }
+
+    pub fn level_file_counts(&self) -> Vec<usize> {
+        let n = self.manifest.level_count().max(7);
+        (0..n).map(|lvl| self.manifest.get_level(lvl).len()).collect()
     }
 
     fn compact_once(&self) -> bool {

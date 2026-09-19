@@ -7,4 +7,4 @@ pub mod memtable;
 pub mod sstable;
 pub mod wal;
 
-pub use lsm::LsmStorage;
+pub use lsm::{LsmStats, LsmStorage};
