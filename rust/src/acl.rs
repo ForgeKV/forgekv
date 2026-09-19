@@ -512,7 +512,7 @@ fn command_category_mask(command: &str) -> u64 {
     match command.as_str() {
         "AUTH" | "HELLO" | "ACL" | "CLIENT" | "COMMAND" | "CONFIG" | "INFO" | "DBSIZE"
         | "SELECT" | "PING" | "ECHO" | "QUIT" | "RESET" | "DEBUG" | "SLOWLOG" | "LATENCY"
-        | "MEMORY" | "SAVE" | "BGSAVE" | "BGREWRITEAOF" | "LASTSAVE" | "TIME" | "WAIT"
+        | "MEMORY" | "COMPACT" | "SAVE" | "BGSAVE" | "BGREWRITEAOF" | "LASTSAVE" | "TIME" | "WAIT"
         | "WAITAOF" | "OBJECT" | "LOLWUT" | "REPLICAOF" | "SLAVEOF" | "FAILOVER" | "PSYNC"
         | "REPLCONF" | "CLUSTER" | "DFLY" => CAT_SERVER,
         "PUBLISH" | "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "PUBSUB"

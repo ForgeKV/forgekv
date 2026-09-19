@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -8,14 +9,34 @@ use parking_lot::RwLock;
 use super::manifest::Manifest;
 use super::sstable::{SSTableReader, SSTableWriter};
 
-const L0_THRESHOLD: usize = 4;
-/// Max bytes per level: index 0=unused, 1=10MB, 2=100MB, 3=1000MB
-const LEVEL_MAX_BYTES: [u64; 4] = [0, 10 * 1024 * 1024, 100 * 1024 * 1024, 1000 * 1024 * 1024];
+/// Trigger L0→L1 once this many L0 files accumulate.
+/// With 256 shards flushing independently, a low threshold lets L0 explode
+/// faster than a single compaction thread can drain it.
+const L0_THRESHOLD: usize = 64;
+/// Cap how many L0 files one compaction pass consumes (bounds peak RAM).
+const L0_COMPACT_BATCH: usize = 128;
+/// Target SST size after compaction — fewer, larger files → less churn.
+const TARGET_FILE_SIZE: usize = 64 * 1024 * 1024;
+/// Max bytes per level (index = level). L0 is file-count based.
+/// Sized for multi-GB hotel caches without perpetual L1 self-rewrites.
+const LEVEL_MAX_BYTES: [u64; 7] = [
+    0,
+    512 * 1024 * 1024,       // L1: 512MB
+    4 * 1024 * 1024 * 1024,  // L2: 4GB
+    16 * 1024 * 1024 * 1024, // L3: 16GB
+    64 * 1024 * 1024 * 1024, // L4: 64GB
+    256 * 1024 * 1024 * 1024,// L5: 256GB
+    u64::MAX,                // L6: unbounded sink
+];
 
 pub struct Compaction {
     data_dir: PathBuf,
     manifest: Arc<Manifest>,
     open_readers: RwLock<HashMap<String, Arc<SSTableReader>>>,
+    /// Prevent overlapping compaction passes (bg thread + post-flush).
+    compacting: AtomicBool,
+    /// Set by flush worker; bg compaction thread clears and runs.
+    compact_requested: AtomicBool,
 }
 
 impl Compaction {
@@ -24,6 +45,8 @@ impl Compaction {
             data_dir,
             manifest,
             open_readers: RwLock::new(HashMap::new()),
+            compacting: AtomicBool::new(false),
+            compact_requested: AtomicBool::new(false),
         }
     }
 
@@ -50,14 +73,72 @@ impl Compaction {
     }
 
     pub fn maybe_compact(&self) {
-        // Check L0
-        let l0_files = self.manifest.get_level(0);
-        if l0_files.len() >= L0_THRESHOLD {
-            self.compact_l0_to_l1(l0_files);
+        // Single-flight: skip if another pass is already running.
+        if self
+            .compacting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        // Drain while work remains, but bound iterations so writers aren't starved
+        // of disk bandwidth. Prefer shorter bursts under write load.
+        for _ in 0..4 {
+            let did_work = self.compact_once();
+            if !did_work {
+                break;
+            }
+        }
+        self.compacting.store(false, Ordering::SeqCst);
+    }
+
+    /// Ask the compaction thread to run soon (non-blocking).
+    pub fn request_compact(&self) {
+        self.compact_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_compact_request(&self) -> bool {
+        self.compact_requested.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn is_compacting(&self) -> bool {
+        self.compacting.load(Ordering::Relaxed)
+    }
+
+    pub fn level_file_counts(&self) -> Vec<usize> {
+        let n = self.manifest.level_count().max(7);
+        (0..n).map(|lvl| self.manifest.get_level(lvl).len()).collect()
+    }
+
+    fn compact_once(&self) -> bool {
+        // If L1 is massively oversized, promote it first so L0→L1 cannot
+        // keep rewriting against a 10k-file L1 forever.
+        {
+            let l1 = self.manifest.get_level(1);
+            if l1.len() > 512 {
+                let total_size: u64 = l1
+                    .iter()
+                    .filter_map(|f| {
+                        std::fs::metadata(self.data_dir.join(f))
+                            .ok()
+                            .map(|m| m.len())
+                    })
+                    .sum();
+                if total_size > LEVEL_MAX_BYTES[1] || l1.len() > 1024 {
+                    self.compact_level_to_next(1, l1);
+                    return true;
+                }
+            }
         }
 
-        // Check L1+ by size
-        for level in 1..LEVEL_MAX_BYTES.len() {
+        let l0_files = self.manifest.get_level(0);
+        if l0_files.len() >= L0_THRESHOLD {
+            let batch: Vec<String> = l0_files.into_iter().take(L0_COMPACT_BATCH).collect();
+            self.compact_l0_to_l1(batch);
+            return true;
+        }
+
+        for level in 1..LEVEL_MAX_BYTES.len().saturating_sub(1) {
             let files = self.manifest.get_level(level);
             if files.is_empty() {
                 continue;
@@ -72,9 +153,11 @@ impl Compaction {
                 .sum();
 
             if total_size > LEVEL_MAX_BYTES[level] {
-                self.compact_level(level, files);
+                self.compact_level_to_next(level, files);
+                return true;
             }
         }
+        false
     }
 
     pub fn search_sstables(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
@@ -143,9 +226,31 @@ impl Compaction {
     }
 
     fn compact_l0_to_l1(&self, l0_files: Vec<String>) {
+        if l0_files.is_empty() {
+            return;
+        }
         let merged = self.merge_files(&l0_files);
-        // Also merge with existing L1 files that overlap
-        let l1_files = self.manifest.get_level(1);
+
+        // Never merge the entire L1 set when it is huge — that stalls forever
+        // (15k tiny SSTs × full rewrite was the production failure mode).
+        // Cap L1 inputs; remaining L1 is drained by compact_level_to_next.
+        const MAX_L1_MERGE: usize = 64;
+        let l1_all = self.manifest.get_level(1);
+        let l1_files: Vec<String> = if l1_all.len() > MAX_L1_MERGE {
+            // Prefer a small newest slice; L0 still wins on key overwrite.
+            l1_all
+                .iter()
+                .rev()
+                .take(MAX_L1_MERGE)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        } else {
+            l1_all
+        };
+
         let merged = if !l1_files.is_empty() {
             let mut all_merged = self.merge_files(&l1_files);
             // L0 wins over L1
@@ -167,21 +272,11 @@ impl Compaction {
             self.close_reader(f);
         }
 
-        // Update manifest
-        let mut all_input: Vec<String> = l0_files.clone();
-        all_input.extend(l1_files.clone());
-
-        // Remove L0 files
-        {
-            let mut levels = Vec::new();
-            for f in &l0_files {
-                levels.push((0usize, f.clone()));
-            }
-            for (level, file) in &levels {
-                self.manifest.remove_file(*level, file);
-            }
+        // Remove L0 batch
+        for f in &l0_files {
+            self.manifest.remove_file(0, f);
         }
-        // Remove L1 files
+        // Remove only the L1 files we actually merged
         for f in &l1_files {
             self.manifest.remove_file(1, f);
         }
@@ -192,7 +287,7 @@ impl Compaction {
 
         let _ = self.manifest.save();
 
-        // Delete old files
+        // Delete old files (release space; close_reader dropped FDs first)
         for f in &l0_files {
             let _ = std::fs::remove_file(self.data_dir.join(f));
         }
@@ -201,27 +296,78 @@ impl Compaction {
         }
     }
 
-    fn compact_level(&self, level: usize, files: Vec<String>) {
-        let merged = self.merge_files(&files);
-        // Filter tombstones at level >= 2
-        let merged = if level >= 2 {
+    /// Promote an oversized level into the next level (never rewrite in-place).
+    /// In-place L1 rewrites were the root cause of 15k+ tiny SST churn.
+    fn compact_level_to_next(&self, level: usize, files: Vec<String>) {
+        let next_level = level + 1;
+        if files.is_empty() {
+            return;
+        }
+
+        // Bound RAM: if the level is huge, promote only a prefix of files.
+        const MAX_FILES_PER_PASS: usize = 256;
+        let (batch, _rest): (Vec<_>, Vec<_>) = if files.len() > MAX_FILES_PER_PASS {
+            let mut sorted = files;
+            sorted.sort();
+            let batch = sorted.iter().take(MAX_FILES_PER_PASS).cloned().collect();
+            let rest = sorted.into_iter().skip(MAX_FILES_PER_PASS).collect();
+            (batch, rest)
+        } else {
+            (files, Vec::new())
+        };
+
+        let merged = self.merge_files(&batch);
+        let next_files = self.manifest.get_level(next_level);
+
+        // Full merge with next level when promoting (simple + correct for our sizes).
+        // Cap next-level inputs similarly if enormous.
+        let next_batch: Vec<String> = if next_files.len() > MAX_FILES_PER_PASS {
+            next_files.into_iter().take(MAX_FILES_PER_PASS).collect()
+        } else {
+            next_files
+        };
+
+        let merged = if !next_batch.is_empty() {
+            let mut all_merged = self.merge_files(&next_batch);
+            for (k, v) in merged {
+                all_merged.insert(k, v); // newer level wins
+            }
+            all_merged
+        } else {
+            merged
+        };
+
+        // Drop tombstones at level >= 2 destinations
+        let merged = if next_level >= 2 {
             merged.into_iter().filter(|(_, v)| v.is_some()).collect()
         } else {
             merged
         };
 
-        let new_files = self.write_compacted_files(merged, level);
+        let new_files = self.write_compacted_files(merged, next_level);
 
-        for f in &files {
+        for f in &batch {
+            self.close_reader(f);
+        }
+        for f in &next_batch {
             self.close_reader(f);
         }
 
-        // Update manifest
-        self.manifest.replace_files(level, &files, level, new_files);
+        for f in &batch {
+            self.manifest.remove_file(level, f);
+        }
+        for f in &next_batch {
+            self.manifest.remove_file(next_level, f);
+        }
+        for f in &new_files {
+            self.manifest.add_file(next_level, f.clone());
+        }
         let _ = self.manifest.save();
 
-        // Delete old files
-        for f in &files {
+        for f in &batch {
+            let _ = std::fs::remove_file(self.data_dir.join(f));
+        }
+        for f in &next_batch {
             let _ = std::fs::remove_file(self.data_dir.join(f));
         }
     }
@@ -252,9 +398,6 @@ impl Compaction {
             return new_files;
         }
 
-        // Split into chunks of ~2MB per file
-        const TARGET_FILE_SIZE: usize = 2 * 1024 * 1024;
-
         let mut chunk: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
         let mut chunk_size = 0usize;
 
@@ -264,10 +407,7 @@ impl Compaction {
             chunk.insert(k, v);
 
             if chunk_size >= TARGET_FILE_SIZE {
-                let seq = self.manifest.next_sequence();
-                let filename = format!("L{}-{}.sst", level, seq);
-                let path = self.data_dir.join(&filename);
-                if SSTableWriter::write(&path, &chunk).is_ok() {
+                if let Some(filename) = self.write_chunk(&chunk, level) {
                     new_files.push(filename);
                 }
                 chunk.clear();
@@ -276,14 +416,34 @@ impl Compaction {
         }
 
         if !chunk.is_empty() {
-            let seq = self.manifest.next_sequence();
-            let filename = format!("L{}-{}.sst", level, seq);
-            let path = self.data_dir.join(&filename);
-            if SSTableWriter::write(&path, &chunk).is_ok() {
+            if let Some(filename) = self.write_chunk(&chunk, level) {
                 new_files.push(filename);
             }
         }
 
         new_files
+    }
+
+    fn write_chunk(
+        &self,
+        chunk: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        level: usize,
+    ) -> Option<String> {
+        if chunk.is_empty() {
+            return None;
+        }
+        let seq = self.manifest.next_sequence();
+        let filename = format!("L{}-{}.sst", level, seq);
+        let path = self.data_dir.join(&filename);
+        if SSTableWriter::write(&path, chunk).is_ok() {
+            // Avoid leaving zero-byte ghost SSTs in the manifest.
+            if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            Some(filename)
+        } else {
+            None
+        }
     }
 }

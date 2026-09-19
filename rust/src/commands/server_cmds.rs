@@ -269,6 +269,8 @@ impl CommandHandler for InfoCommand {
             .map(|s| s.to_lowercase())
             .unwrap_or_else(|| "default".to_string());
 
+        let (rss_bytes, vm_bytes) = read_process_memory();
+        let lsm = self.db.lsm_stats();
         let uptime_secs = self.info.start_time.elapsed().as_secs();
         let total_conns = self.info.total_connections.load(Ordering::Relaxed);
         let total_cmds = self.info.total_commands.load(Ordering::Relaxed);
@@ -348,22 +350,22 @@ impl CommandHandler for InfoCommand {
         if include_all || section == "memory" {
             output.push_str(&format!(
                 "# Memory\r\n\
-                used_memory:1000000\r\n\
-                used_memory_human:976.56K\r\n\
-                used_memory_rss:2000000\r\n\
-                used_memory_rss_human:1.91M\r\n\
-                used_memory_peak:1000000\r\n\
-                used_memory_peak_human:976.56K\r\n\
+                used_memory:{used}\r\n\
+                used_memory_human:{used_h}\r\n\
+                used_memory_rss:{rss}\r\n\
+                used_memory_rss_human:{rss_h}\r\n\
+                used_memory_peak:{used}\r\n\
+                used_memory_peak_human:{used_h}\r\n\
                 used_memory_peak_perc:100.00%\r\n\
-                used_memory_overhead:500000\r\n\
-                used_memory_startup:500000\r\n\
-                used_memory_dataset:500000\r\n\
-                used_memory_dataset_perc:50.00%\r\n\
-                allocator_allocated:1000000\r\n\
-                allocator_active:1200000\r\n\
-                allocator_resident:2000000\r\n\
-                total_system_memory:8000000000\r\n\
-                total_system_memory_human:7.45G\r\n\
+                used_memory_overhead:0\r\n\
+                used_memory_startup:0\r\n\
+                used_memory_dataset:{used}\r\n\
+                used_memory_dataset_perc:100.00%\r\n\
+                allocator_allocated:{used}\r\n\
+                allocator_active:{used}\r\n\
+                allocator_resident:{rss}\r\n\
+                total_system_memory:{sysmem}\r\n\
+                total_system_memory_human:{sysmem_h}\r\n\
                 used_memory_lua:37888\r\n\
                 used_memory_vm_eval:37888\r\n\
                 used_memory_lua_human:37.00K\r\n\
@@ -398,11 +400,17 @@ impl CommandHandler for InfoCommand {
                 active_defrag_running:0\r\n\
                 lazyfree_pending_objects:0\r\n\
                 lazyfreed_objects:0\r\n",
+                used = vm_bytes,
+                used_h = human_bytes(vm_bytes),
+                rss = rss_bytes,
+                rss_h = human_bytes(rss_bytes),
+                sysmem = total_system_memory(),
+                sysmem_h = human_bytes(total_system_memory()),
                 maxmem = self.config.max_memory,
                 maxmem_h = if self.config.max_memory == 0 {
                     "0B".to_string()
                 } else {
-                    format!("{}B", self.config.max_memory)
+                    human_bytes(self.config.max_memory)
                 },
                 policy = self.config.max_memory_policy.as_str(),
             ));
@@ -438,13 +446,31 @@ impl CommandHandler for InfoCommand {
                 aof_last_cow_size:0\r\n\
                 module_fork_in_progress:0\r\n\
                 module_fork_last_cow_size:0\r\n\
-                lsm_wal_sync_mode:{wal}\r\n",
+                lsm_wal_sync_mode:{wal}\r\n\
+                lsm_pending_flushes:{pend}\r\n\
+                lsm_flushes_completed:{fldone}\r\n\
+                lsm_write_stalls:{stalls}\r\n\
+                lsm_last_flush_us:{flush_us}\r\n\
+                lsm_last_stall_us:{stall_us}\r\n\
+                lsm_compacting:{compacting}\r\n\
+                lsm_l0_files:{l0}\r\n\
+                lsm_total_sst_files:{ssts}\r\n\
+                lsm_memtable_shard_bytes:{mt}\r\n",
                 ts = start_ts,
                 wal = match self.config.wal_sync_mode {
                     crate::config::WalSyncMode::Always => "always",
                     crate::config::WalSyncMode::Everysec => "everysec",
                     crate::config::WalSyncMode::No => "no",
                 },
+                pend = lsm.pending_flushes,
+                fldone = lsm.flushes_completed,
+                stalls = lsm.write_stalls,
+                flush_us = lsm.last_flush_micros,
+                stall_us = lsm.last_stall_micros,
+                compacting = if lsm.compacting { 1 } else { 0 },
+                l0 = lsm.l0_files,
+                ssts = lsm.total_sst_files,
+                mt = lsm.memtable_shard_bytes,
             ));
         }
 
@@ -1928,6 +1954,89 @@ impl CommandHandler for MemoryCommand {
             }
             _ => RespValue::error("ERR unknown subcommand. Try MEMORY HELP."),
         }
+    }
+}
+
+
+fn read_process_memory() -> (u64, u64) {
+    // Best-effort from /proc; cheap and good enough for INFO memory.
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let mut rss_kb = 0u64;
+    let mut vm_kb = 0u64;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            rss_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("VmSize:") {
+            vm_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    (rss_kb.saturating_mul(1024), vm_kb.saturating_mul(1024))
+}
+
+fn total_system_memory() -> u64 {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            return kb.saturating_mul(1024);
+        }
+    }
+    0
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{}B", n)
+    } else {
+        format!("{:.2}{}", v, UNITS[i])
+    }
+}
+
+// ─── COMPACT (LSM admin) ──────────────────────────────────────────────────────
+
+pub struct CompactCommand {
+    pub db: Arc<RedisDatabase>,
+}
+
+impl CommandHandler for CompactCommand {
+    fn name(&self) -> &str {
+        "COMPACT"
+    }
+    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+        // Bounded single-flight compaction; writers no longer run this on SET path.
+        self.db.compact_lsm();
+        let s = self.db.lsm_stats();
+        RespValue::Array(Some(vec![
+            RespValue::bulk_str("l0_files"),
+            RespValue::integer(s.l0_files as i64),
+            RespValue::bulk_str("total_sst_files"),
+            RespValue::integer(s.total_sst_files as i64),
+            RespValue::bulk_str("pending_flushes"),
+            RespValue::integer(s.pending_flushes as i64),
+            RespValue::bulk_str("write_stalls"),
+            RespValue::integer(s.write_stalls as i64),
+            RespValue::bulk_str("compacting"),
+            RespValue::integer(if s.compacting { 1 } else { 0 }),
+        ]))
     }
 }
 

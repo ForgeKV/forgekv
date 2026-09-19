@@ -3,10 +3,11 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use super::compaction::Compaction;
 use super::key_encoding::{TAG_HASH, TAG_LIST, TAG_META, TAG_SET, TAG_STRING, TAG_TTL, TAG_ZSET};
@@ -31,10 +32,25 @@ struct FlushPlan {
     archive: Option<std::path::PathBuf>,
 }
 
+/// Snapshot of LSM write/compaction health for INFO / COMPACT diagnostics.
+#[derive(Debug, Clone)]
+pub struct LsmStats {
+    pub memtable_shard_bytes: usize,
+    pub pending_flushes: u64,
+    pub flushes_completed: u64,
+    pub write_stalls: u64,
+    pub last_flush_micros: u64,
+    pub last_stall_micros: u64,
+    pub compacting: bool,
+    pub l0_files: usize,
+    pub total_sst_files: usize,
+    pub level_files: Vec<usize>,
+}
+
 pub struct LsmStorage {
     data_dir: PathBuf,
     /// 256 independent memtable shards — each has its own write lock.
-    mem_shards: Box<[RwLock<MemShard>]>,
+    mem_shards: Arc<[RwLock<MemShard>]>,
     /// 256 WAL files — one per shard, eliminating cross-shard WAL contention.
     wals: Box<[Mutex<WriteAheadLog>]>,
     wal_seq: Arc<AtomicU64>,
@@ -43,6 +59,15 @@ pub struct LsmStorage {
     /// Per-shard memtable size limit. Total capacity ≈ NUM_SHARDS × this.
     memtable_shard_bytes: usize,
     bg_stop: Arc<AtomicBool>,
+    /// Bounded queue: SET never waits on SST write / compaction; flush worker does.
+    flush_tx: SyncSender<FlushPlan>,
+    /// Wake writers blocked because active+immutable are both full.
+    flush_cv: Arc<(Mutex<()>, Condvar)>,
+    pending_flushes: Arc<AtomicU64>,
+    flushes_completed: Arc<AtomicU64>,
+    write_stalls: Arc<AtomicU64>,
+    last_flush_micros: Arc<AtomicU64>,
+    last_stall_micros: Arc<AtomicU64>,
 }
 
 /// FNV-1a hash → shard index in 0..NUM_SHARDS.
@@ -91,6 +116,9 @@ impl LsmStorage {
         fs::create_dir_all(&data_dir)?;
 
         // Divide total memtable budget equally across shards.
+        // Floor at 1MB/shard so low configs are not silently inflated to 2GB
+        // (8MB×256), while still avoiding tiny ~KB SST storms.
+        // memtable-size-mb 2048 → 8MB/shard; 256 → 1MB/shard.
         let total_bytes = (config.memtable_size_mb * 1024 * 1024) as usize;
         let memtable_shard_bytes = (total_bytes / NUM_SHARDS).max(1024 * 1024);
 
@@ -139,20 +167,38 @@ impl LsmStorage {
                 WalOpType::Delete => mem.active.delete(key),
             }
         }
-        let mem_shards = mem_shards.into_boxed_slice();
+        let mem_shards: Arc<[RwLock<MemShard>]> = Arc::from(mem_shards.into_boxed_slice());
+
+        // Bound the flush queue so a write storm cannot enqueue unbounded SST work.
+        // Capacity ≈ one pending flush per shard (natural LSM immutable slot).
+        let (flush_tx, flush_rx) = mpsc::sync_channel::<FlushPlan>(NUM_SHARDS);
+        let bg_stop = Arc::new(AtomicBool::new(false));
+        let flush_cv = Arc::new((Mutex::new(()), Condvar::new()));
+        let pending_flushes = Arc::new(AtomicU64::new(0));
+        let flushes_completed = Arc::new(AtomicU64::new(0));
+        let write_stalls = Arc::new(AtomicU64::new(0));
+        let last_flush_micros = Arc::new(AtomicU64::new(0));
+        let last_stall_micros = Arc::new(AtomicU64::new(0));
 
         let storage = LsmStorage {
             data_dir: data_dir.clone(),
-            mem_shards,
+            mem_shards: mem_shards.clone(),
             wals,
-            wal_seq,
+            wal_seq: wal_seq.clone(),
             manifest: manifest.clone(),
             compaction: compaction.clone(),
             memtable_shard_bytes,
-            bg_stop: Arc::new(AtomicBool::new(false)),
+            bg_stop: bg_stop.clone(),
+            flush_tx,
+            flush_cv: flush_cv.clone(),
+            pending_flushes: pending_flushes.clone(),
+            flushes_completed: flushes_completed.clone(),
+            write_stalls: write_stalls.clone(),
+            last_flush_micros: last_flush_micros.clone(),
+            last_stall_micros: last_stall_micros.clone(),
         };
 
-        // Flush any recovered data to L0
+        // Flush any recovered data to L0 (still synchronous at startup).
         let any_data = storage
             .mem_shards
             .iter()
@@ -162,17 +208,86 @@ impl LsmStorage {
         }
         Self::cleanup_archived_wals(&data_dir)?;
 
-        // Start background compaction thread
-        let bg_stop = storage.bg_stop.clone();
+        // Background flush worker: SET returns after WAL+memtable; SST I/O happens here.
+        // Compaction is NEVER run on the write path — only on the compaction thread.
+        {
+            let mem_shards = mem_shards.clone();
+            let manifest = manifest.clone();
+            let compaction = compaction.clone();
+            let data_dir = data_dir.clone();
+            let bg_stop = bg_stop.clone();
+            let flush_cv = flush_cv.clone();
+            let pending_flushes = pending_flushes.clone();
+            let flushes_completed = flushes_completed.clone();
+            let last_flush_micros = last_flush_micros.clone();
+            std::thread::Builder::new()
+                .name("forgekv-flush".into())
+                .spawn(move || {
+                    while !bg_stop.load(Ordering::Relaxed) {
+                        match flush_rx.recv_timeout(Duration::from_millis(200)) {
+                            Ok(plan) => {
+                                let t0 = Instant::now();
+                                let flush_ok =
+                                    Self::flush_snapshot_to_l0_static(
+                                        &data_dir,
+                                        &manifest,
+                                        &plan.snapshot,
+                                    )
+                                    .is_ok();
+                                {
+                                    let mut mem = mem_shards[plan.shard].write();
+                                    if flush_ok {
+                                        mem.immutable = None;
+                                    }
+                                    mem.immutable_flushing = false;
+                                }
+                                if flush_ok {
+                                    if let Some(path) = plan.archive {
+                                        let _ = fs::remove_file(path);
+                                    }
+                                }
+                                pending_flushes.fetch_sub(1, Ordering::Relaxed);
+                                flushes_completed.fetch_add(1, Ordering::Relaxed);
+                                last_flush_micros.store(
+                                    t0.elapsed().as_micros() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                // Unblock writers waiting for immutable slot.
+                                flush_cv.1.notify_all();
+                                // Never compact on the flush thread — only signal.
+                                compaction.request_compact();
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                })
+                .expect("flush thread");
+        }
+
+        // Start background compaction thread (250ms tick; single-flight).
+        let bg_stop2 = bg_stop.clone();
         let bg_compaction = compaction.clone();
-        std::thread::spawn(move || {
-            while !bg_stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_secs(5));
-                if !bg_stop.load(Ordering::Relaxed) {
-                    bg_compaction.maybe_compact();
+        std::thread::Builder::new()
+            .name("forgekv-compact".into())
+            .spawn(move || {
+                while !bg_stop2.load(Ordering::Relaxed) {
+                    // Wake quickly when flushes request work; otherwise idle tick.
+                    let mut waited = 0u64;
+                    while waited < 250 && !bg_stop2.load(Ordering::Relaxed) {
+                        if bg_compaction.take_compact_request() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                        waited += 10;
+                    }
+                    if !bg_stop2.load(Ordering::Relaxed) {
+                        let _ = bg_compaction.take_compact_request();
+                        bg_compaction.maybe_compact();
+                    }
                 }
-            }
-        });
+            })
+            .expect("compaction thread");
 
         Ok(storage)
     }
@@ -305,23 +420,69 @@ impl LsmStorage {
         })
     }
 
-    /// If a snapshot was produced by rotation, flush it to L0 and clean up the archive.
-    fn flush_if_needed(&self, plan: Option<FlushPlan>) {
+    /// Enqueue an immutable-memtable flush. Never runs compaction on the caller.
+    fn enqueue_flush(&self, plan: Option<FlushPlan>) {
         if let Some(plan) = plan {
-            let flush_ok = self.flush_snapshot_to_l0(plan.snapshot).is_ok();
-            {
-                let mut mem = self.mem_shards[plan.shard].write();
-                if flush_ok {
-                    mem.immutable = None;
-                }
-                mem.immutable_flushing = false;
-            }
-            if flush_ok {
-                if let Some(path) = plan.archive {
-                    let _ = fs::remove_file(path);
-                }
+            self.pending_flushes.fetch_add(1, Ordering::Relaxed);
+            if self.flush_tx.send(plan).is_err() {
+                self.pending_flushes.fetch_sub(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// When active is full and an immutable flush is already in flight, wait so
+    /// the memtable cannot grow without bound (and so SET does not silently
+    /// absorb multi-GB of pending data under CacheHotels load).
+    fn wait_if_memtable_pressured(&self, shard: usize) {
+        let max_wait = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            {
+                let mem = self.mem_shards[shard].read();
+                if !(mem.active.is_full()
+                    && mem.immutable.is_some()
+                    && mem.immutable_flushing)
+                {
+                    return;
+                }
+            }
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            let (lock, cv) = &*self.flush_cv;
+            let mut guard = lock.lock();
+            let remaining = max_wait.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return;
+            }
+            let t0 = Instant::now();
+            let _ = cv.wait_for(&mut guard, remaining.min(Duration::from_millis(50)));
+            self.last_stall_micros.store(
+                t0.elapsed().as_micros() as u64,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub fn stats(&self) -> LsmStats {
+        let level_files = self.compaction.level_file_counts();
+        let l0_files = level_files.first().copied().unwrap_or(0);
+        let total_sst_files = level_files.iter().sum();
+        LsmStats {
+            memtable_shard_bytes: self.memtable_shard_bytes,
+            pending_flushes: self.pending_flushes.load(Ordering::Relaxed),
+            flushes_completed: self.flushes_completed.load(Ordering::Relaxed),
+            write_stalls: self.write_stalls.load(Ordering::Relaxed),
+            last_flush_micros: self.last_flush_micros.load(Ordering::Relaxed),
+            last_stall_micros: self.last_stall_micros.load(Ordering::Relaxed),
+            compacting: self.compaction.is_compacting(),
+            l0_files,
+            total_sst_files,
+            level_files,
+        }
+    }
+
+    /// Admin/COMPACT: run compaction passes in the background-friendly API.
+    pub fn compact_now(&self) {
+        self.compaction.maybe_compact();
     }
 
     /// Batch write: group entries by shard, write each group under one WAL lock.
@@ -343,6 +504,7 @@ impl LsmStorage {
             if indices.is_empty() {
                 continue;
             }
+            self.wait_if_memtable_pressured(shard);
             let plan = {
                 let mut wal = self.wals[shard].lock();
                 for &i in indices {
@@ -362,7 +524,7 @@ impl LsmStorage {
         }
 
         for plan in to_flush {
-            self.flush_if_needed(Some(plan));
+            self.enqueue_flush(Some(plan));
         }
     }
 
@@ -380,6 +542,7 @@ impl LsmStorage {
             shard_of(&key2),
             "put2: keys must map to the same shard (same Redis key, different tags)"
         );
+        self.wait_if_memtable_pressured(shard);
         let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Put, &key1, &val1);
@@ -389,11 +552,12 @@ impl LsmStorage {
             mem.active.put(key2, val2);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(plan);
+        self.enqueue_flush(plan);
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
         let shard = shard_of(&key);
+        self.wait_if_memtable_pressured(shard);
         let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Put, &key, &value);
@@ -401,11 +565,12 @@ impl LsmStorage {
             mem.active.put(key, value);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(plan);
+        self.enqueue_flush(plan);
     }
 
     pub fn delete(&self, key: Vec<u8>) {
         let shard = shard_of(&key);
+        self.wait_if_memtable_pressured(shard);
         let plan = {
             let mut wal = self.wals[shard].lock();
             let _ = wal.append(WalOpType::Delete, &key, &[]);
@@ -413,7 +578,7 @@ impl LsmStorage {
             mem.active.delete(key);
             self.maybe_rotate_and_snapshot(shard, &mut wal, &mut mem)
         };
-        self.flush_if_needed(plan);
+        self.enqueue_flush(plan);
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -442,11 +607,13 @@ impl LsmStorage {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        // Collect from SSTables first (lowest priority)
-        let mut merged: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-            self.compaction.scan_sstables(start, end);
+        // Memtables FIRST, then SSTables. With async flush, the opposite order
+        // can drop keys: SST snapshot taken → flush publishes SST + clears
+        // immutable → memtable scan misses the data and the SST list is stale.
+        // Mem-first: a concurrent flush may briefly duplicate a key into both
+        // layers, but BTreeMap merge keeps a single correct value.
+        let mut merged: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
-        // Merge all 64 shard memtables (immutable first, then active overrides)
         for mem_shard_lock in self.mem_shards.iter() {
             let mem = mem_shard_lock.read();
             if let Some(ref imm) = mem.immutable {
@@ -457,6 +624,11 @@ impl LsmStorage {
             for (k, v) in mem.active.scan(start, end) {
                 merged.insert(k, v);
             }
+        }
+
+        for (k, v) in self.compaction.scan_sstables(start, end) {
+            // Older SST data must not override newer memtable values.
+            merged.entry(k).or_insert(v);
         }
 
         merged.into_iter().collect()
@@ -485,23 +657,42 @@ impl LsmStorage {
     }
 
     fn flush_snapshot_to_l0(&self, snapshot: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> io::Result<()> {
+        Self::flush_snapshot_to_l0_static(&self.data_dir, &self.manifest, &snapshot)
+    }
+
+    /// Write a memtable snapshot to a new L0 SST. Does **not** run compaction —
+    /// that belongs on the compaction thread so SET/PING stay responsive.
+    fn flush_snapshot_to_l0_static(
+        data_dir: &PathBuf,
+        manifest: &Manifest,
+        snapshot: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> io::Result<()> {
         if snapshot.is_empty() {
             return Ok(());
         }
 
-        let seq = self.manifest.next_sequence();
+        let seq = manifest.next_sequence();
         let filename = format!("L0-{}.sst", seq);
-        let path = self.data_dir.join(&filename);
+        let path = data_dir.join(&filename);
 
-        SSTableWriter::write(&path, &snapshot)?;
-        self.manifest.add_file(0, filename);
-        self.manifest.save()?;
-
+        SSTableWriter::write(&path, snapshot)?;
+        // Skip empty SSTs (should not happen for non-empty snapshot, but guard disk)
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+            let _ = fs::remove_file(&path);
+            return Ok(());
+        }
+        manifest.add_file(0, filename);
+        manifest.save()?;
         Ok(())
     }
 
     pub fn close(&self) {
         self.bg_stop.store(true, Ordering::Relaxed);
+        // Wait briefly for in-flight background flushes before force-flushing.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.pending_flushes.load(Ordering::Relaxed) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let _ = self.force_flush();
         for wal in self.wals.iter() {
             let mut w = wal.lock();

@@ -783,28 +783,62 @@ impl RedisDatabase {
     pub fn db_info(&self, db: usize) -> Result<(i64, i64), RedisError> {
         let _guard = self.shard_r_all();
 
-        let all_keys = self.get_all_live_keys(db);
+        // Single meta-key range scan — do NOT re-get every key (that was O(keys × SSTs)
+        // and hung DBSIZE under CacheHotels while holding all shard read locks).
+        let (keys, expires) = self.count_live_keys(db);
+        Ok((keys, expires))
+    }
+
+    /// Count live keys + keys-with-TTL from one meta scan (values already in hand).
+    fn count_live_keys(&self, db: usize) -> (i64, i64) {
+        let prefix = vec![TAG_META, db as u8];
+        let end_prefix = vec![TAG_META, db as u8 + 1];
+        let entries = self.storage.scan(Some(&prefix), Some(&end_prefix));
         let now = now_ms();
+        let mut keys = 0i64;
         let mut expires = 0i64;
 
-        for key in &all_keys {
-            let meta_key = encode_meta_key(db, key);
-            if let Some(data) = self.storage.get(&meta_key) {
-                if data.len() >= METADATA_SIZE_LEGACY {
-                    let meta = RedisMetadata::deserialize(&data);
-                    if meta.expiry_ms > 0 && meta.expiry_ms > now {
-                        expires += 1;
-                    }
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        for (encoded_key, value) in entries {
+            let value = match value {
+                Some(v) => v,
+                None => continue,
+            };
+            if encoded_key.len() < 4 {
+                continue;
+            }
+            let key_len = u16::from_be_bytes(encoded_key[2..4].try_into().unwrap()) as usize;
+            if encoded_key.len() < 4 + key_len {
+                continue;
+            }
+            let user_key = encoded_key[4..4 + key_len].to_vec();
+            if value.len() >= METADATA_SIZE_LEGACY {
+                let meta = RedisMetadata::deserialize(&value);
+                if meta.is_expired_at(now) {
+                    continue;
+                }
+                if meta.expiry_ms > 0 {
+                    expires += 1;
                 }
             }
+            seen.insert(user_key);
+            keys += 1;
         }
 
-        // Extended keys (Stream, JSON, BF, CF, etc.) count toward db size but have no TTL
-        let ext_count = ext_type_registry::keys_for_db(db).len() as i64;
-        // Avoid double-counting (get_all_live_keys already includes ext keys)
-        let _ = ext_count;
+        for ext_key in ext_type_registry::keys_for_db(db) {
+            if seen.insert(ext_key) {
+                keys += 1;
+            }
+        }
+        (keys, expires)
+    }
 
-        Ok((all_keys.len() as i64, expires))
+    pub fn lsm_stats(&self) -> crate::storage::LsmStats {
+        self.storage.stats()
+    }
+
+    pub fn compact_lsm(&self) {
+        self.storage.compact_now();
     }
 
     pub fn flush_all(&self) -> Result<(), RedisError> {
