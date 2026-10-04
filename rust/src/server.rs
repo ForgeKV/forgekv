@@ -17,6 +17,17 @@ use crate::keyspace::{cmd_event, event_allowed, KS_NOTIFIER};
 use crate::pubsub::{PubSubHub, PubSubMessage};
 use crate::resp::{RespParser, RespValue, RespWriter};
 
+/// Reported by INFO as io_threads_active (blocking pool size used for GET/SET).
+static IO_THREADS_ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_io_threads_active(n: usize) {
+    IO_THREADS_ACTIVE.store(n as u64, Ordering::Relaxed);
+}
+
+pub fn io_threads_active() -> u64 {
+    IO_THREADS_ACTIVE.load(Ordering::Relaxed)
+}
+
 /// Per-connection client state.
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
@@ -267,6 +278,15 @@ impl TcpServer {
     }
 }
 
+
+fn is_inline_fast_path(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "PING" | "ECHO" | "QUIT" | "RESET" | "SELECT"
+            | "TIME" | "LASTSAVE" | "READONLY" | "READWRITE"
+    )
+}
+
 fn noperm_response() -> RespValue {
     RespValue::error("NOPERM this user has no permissions to run the command")
 }
@@ -497,29 +517,59 @@ async fn handle_client(
                                         } else {
                                             in_multi = false;
                                             let cmds = std::mem::take(&mut queued_cmds);
-                                            let results: Vec<RespValue> = cmds
-                                                .iter()
-                                                .map(|c| {
-                                                    let queued_cmd = c.get(0)
-                                                        .and_then(|a| a.as_str())
-                                                        .map(|s| s.to_uppercase())
-                                                        .unwrap_or_default();
-                                                    if !acl.is_command_allowed(&username, &queued_cmd) {
-                                                        let client_info = acl_client_info(&client_registry, client_id, &username);
-                                                        acl.log_entry("command", &queued_cmd.to_lowercase(), &username, &client_info);
-                                                        noperm_response()
-                                                    } else {
-                                                        registry.execute(&mut db_index, c)
-                                                    }
-                                                })
-                                                .collect();
-                                            RespValue::Array(Some(results))
+                                            // Run EXEC body on blocking pool so SET/GET
+                                            // under MULTI do not pin the tokio worker.
+                                            let registry_exec = registry.clone();
+                                            let acl_exec = acl.clone();
+                                            let username_exec = username.clone();
+                                            let client_registry_exec = client_registry.clone();
+                                            let mut idx = db_index;
+                                            let (exec_resp, new_idx) = tokio::task::spawn_blocking(move || {
+                                                let results: Vec<RespValue> = cmds
+                                                    .iter()
+                                                    .map(|c| {
+                                                        let queued_cmd = c.get(0)
+                                                            .and_then(|a| a.as_str())
+                                                            .map(|s| s.to_uppercase())
+                                                            .unwrap_or_default();
+                                                        if !acl_exec.is_command_allowed(&username_exec, &queued_cmd) {
+                                                            let client_info = acl_client_info(&client_registry_exec, client_id, &username_exec);
+                                                            acl_exec.log_entry("command", &queued_cmd.to_lowercase(), &username_exec, &client_info);
+                                                            noperm_response()
+                                                        } else {
+                                                            registry_exec.execute(&mut idx, c)
+                                                        }
+                                                    })
+                                                    .collect();
+                                                (RespValue::Array(Some(results)), idx)
+                                            }).await.unwrap_or_else(|e| {
+                                                (RespValue::error(&format!("ERR exec failed: {e}")), db_index)
+                                            });
+                                            db_index = new_idx;
+                                            exec_resp
                                         }
                                     } else if in_multi {
                                         queued_cmds.push(args.clone());
                                         RespValue::simple("QUEUED")
-                                    } else {
+                                    } else if is_inline_fast_path(&cmd_upper) {
+                                        // Keep PING/ECHO on the async worker — they must stay
+                                        // sub-millisecond and do not touch storage.
                                         registry.execute(&mut db_index, &args)
+                                    } else {
+                                        // GET/SET/SCAN/DBSIZE/etc. on spawn_blocking so a
+                                        // single StackExchange.Redis connection cannot pin
+                                        // one tokio worker at 100% CPU during SST reads.
+                                        let registry_cmd = registry.clone();
+                                        let args_owned = args.clone();
+                                        let mut idx = db_index;
+                                        let (resp, new_idx) = tokio::task::spawn_blocking(move || {
+                                            let resp = registry_cmd.execute(&mut idx, &args_owned);
+                                            (resp, idx)
+                                        }).await.unwrap_or_else(|e| {
+                                            (RespValue::error(&format!("ERR command failed: {e}")), db_index)
+                                        });
+                                        db_index = new_idx;
+                                        resp
                                     };
 
                                     // ── Keyspace notifications ────────────────

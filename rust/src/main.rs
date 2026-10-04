@@ -539,10 +539,9 @@ fn register_all(
     registry.register(Arc::new(TDigestInfoCommand));
 }
 
-#[tokio::main]
-async fn main() {
+fn load_config() -> ServerConfig {
     let args: Vec<String> = std::env::args().collect();
-    let base_config = if args.len() >= 3 && args[1] == "--config" {
+    if args.len() >= 3 && args[1] == "--config" {
         match config::ConfigParser::parse_file(&args[2]) {
             Ok(c) => c,
             Err(e) => {
@@ -560,13 +559,36 @@ async fn main() {
         }
     } else {
         ServerConfig::default()
-    };
+    }
+}
 
+fn main() {
+    let base_config = load_config();
+    // Honor io-threads: size the blocking pool so GET/SET (spawn_blocking) can
+    // use multiple cores even when StackExchange.Redis multiplexes one connection
+    // onto a single tokio task.
+    let io_threads = base_config.io_threads.max(1) as usize;
+    let blocking_threads = io_threads.max(4).min(512);
     eprintln!(
-        "Starting ForgeKV on {}:{}",
-        base_config.bind, base_config.port
+        "Starting ForgeKV on {}:{} (io-threads={}, blocking-threads={})",
+        base_config.bind, base_config.port, io_threads, blocking_threads
     );
     eprintln!("Data directory: {}", base_config.dir);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(blocking_threads)
+        .thread_name("forgekv-worker")
+        .build()
+        .expect("failed to build tokio runtime");
+
+    // Expose for INFO io_threads_active
+    server::set_io_threads_active(if io_threads > 1 { io_threads } else { blocking_threads });
+
+    rt.block_on(async_main(base_config));
+}
+
+async fn async_main(base_config: ServerConfig) {
 
     // Shared config (writable at runtime via CONFIG SET)
     let config = Arc::new(RwLock::new(base_config.clone()));
@@ -604,15 +626,22 @@ async fn main() {
         db.clone(),
     );
 
-    register_all(registry.clone(), db.clone(), hub, config, acl, &tcp_server);
+    register_all(registry.clone(), db.clone(), hub, config.clone(), acl, &tcp_server);
 
-    // TTL sweeper
+    // TTL sweeper — respects active-expire-enabled, never takes all shard write
+    // locks, and runs on the blocking pool so it cannot pin a tokio worker.
     let db_for_sweep = db.clone();
+    let config_for_sweep = config.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            db_for_sweep.sweep_expired();
+            let enabled = config_for_sweep.read().active_expire_enabled;
+            let db = db_for_sweep.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                db.sweep_expired_batch(enabled, 64);
+            })
+            .await;
         }
     });
 
