@@ -317,7 +317,7 @@ impl CommandHandler for InfoCommand {
                 lsm_enabled:1\r\n\
                 executable:forgekv\r\n\
                 config_file:\r\n\
-                io_threads_active:0\r\n",
+                io_threads_active:{io_active}\r\n",
                 pid = std::process::id(),
                 run_id = "0000000000000000000000000000000000000000",
                 port = self.info.port,
@@ -325,6 +325,7 @@ impl CommandHandler for InfoCommand {
                 uptime = uptime_secs,
                 uptime_days = uptime_secs / 86400,
                 hz = self.config.hz,
+                io_active = crate::server::io_threads_active(),
             ));
         }
 

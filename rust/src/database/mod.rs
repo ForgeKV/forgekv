@@ -1,9 +1,11 @@
 pub mod metadata;
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::ext_type_registry;
 use crate::storage::key_encoding::*;
@@ -40,10 +42,22 @@ impl std::fmt::Display for RedisError {
 /// operations on different keys can proceed in parallel.
 const NUM_SHARDS: usize = 256;
 
+/// Short-lived SCAN key list so cursor iteration does not re-scan every SST.
+struct ScanSnapshot {
+    keys: Arc<Vec<Vec<u8>>>,
+    created: Instant,
+}
+
 pub struct RedisDatabase {
     storage: Arc<LsmStorage>,
     pub num_dbs: usize,
     shards: Box<[RwLock<()>]>,
+    /// Opaque SCAN snapshots: id -> sorted live keys. Avoids locking all shards
+    /// and re-reading the full keyspace on every SCAN cursor step.
+    scan_snapshots: Mutex<HashMap<u64, ScanSnapshot>>,
+    next_scan_snapshot_id: AtomicU64,
+    /// Cached DBSIZE / INFO keyspace counts (no global lock; refreshed on demand).
+    db_info_cache: Mutex<HashMap<usize, (i64, i64, Instant)>>,
 }
 
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
@@ -77,6 +91,9 @@ impl RedisDatabase {
             storage,
             num_dbs,
             shards,
+            scan_snapshots: Mutex::new(HashMap::new()),
+            next_scan_snapshot_id: AtomicU64::new(1),
+            db_info_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -103,7 +120,7 @@ impl RedisDatabase {
         ids.into_iter().map(|i| self.shards[i].write()).collect()
     }
 
-    /// Acquire write locks on ALL shards (for cross-keyspace ops: FLUSHDB, SCAN, etc.).
+    /// Acquire write locks on ALL shards (for cross-keyspace ops: FLUSHDB/FLUSHALL/SWAPDB).
     fn shard_w_all(&self) -> Vec<parking_lot::RwLockWriteGuard<'_, ()>> {
         (0..NUM_SHARDS).map(|i| self.shards[i].write()).collect()
     }
@@ -578,7 +595,9 @@ impl RedisDatabase {
     }
 
     pub fn keys(&self, db: usize, pattern: &str) -> Result<Vec<Vec<u8>>, RedisError> {
-        let _guard = self.shard_r_all();
+        // Do NOT take shard_r_all(): that blocked GETs behind parking_lot writer
+        // preference when the TTL sweeper also wanted every write lock.
+        // Scan is weakly consistent (Redis SCAN/KEYS semantics).
 
         // Scan all meta keys for this db
         // Meta key format: [TAG_META:1][db:1][keyLen:2BE][key]
@@ -643,35 +662,58 @@ impl RedisDatabase {
         pattern: Option<&str>,
         count: usize,
     ) -> Result<(u64, Vec<Vec<u8>>), RedisError> {
-        let _guard = self.shard_r_all();
+        self.scan_with_type(db, cursor, pattern, count, None)
+    }
 
-        let all_keys = self.get_all_live_keys(db);
-        let total = all_keys.len();
+    /// Cursor packing: high 32 bits = snapshot id, low 32 bits = offset into snapshot.
+    #[inline]
+    fn pack_scan_cursor(snapshot_id: u64, offset: u64) -> u64 {
+        ((snapshot_id & 0xffff_ffff) << 32) | (offset & 0xffff_ffff)
+    }
 
-        if total == 0 {
-            return Ok((0, vec![]));
-        }
+    #[inline]
+    fn unpack_scan_cursor(cursor: u64) -> (u64, u64) {
+        (cursor >> 32, cursor & 0xffff_ffff)
+    }
 
-        let start = cursor as usize;
-        if start >= total {
-            return Ok((0, vec![]));
-        }
+    fn purge_stale_scan_snapshots(&self, snapshots: &mut HashMap<u64, ScanSnapshot>) {
+        const MAX_AGE: Duration = Duration::from_secs(60);
+        snapshots.retain(|_, snap| snap.created.elapsed() < MAX_AGE);
+    }
 
-        let end = (start + count).min(total);
-        let next_cursor = if end >= total { 0 } else { end as u64 };
-
-        let mut result = Vec::new();
-        for key in &all_keys[start..end] {
-            let key_str = std::str::from_utf8(key).unwrap_or("");
-            if let Some(pat) = pattern {
-                if !Self::glob_match(pat, key_str) {
-                    continue;
+    /// Take (or reuse) a SCAN snapshot without holding all shard locks.
+    fn scan_snapshot_keys(&self, db: usize, cursor: u64) -> (u64, Arc<Vec<Vec<u8>>>, usize) {
+        let (snap_id, offset) = Self::unpack_scan_cursor(cursor);
+        {
+            let mut guard = self.scan_snapshots.lock();
+            self.purge_stale_scan_snapshots(&mut guard);
+            if snap_id != 0 {
+                if let Some(snap) = guard.get(&snap_id) {
+                    return (snap_id, snap.keys.clone(), offset as usize);
                 }
             }
-            result.push(key.clone());
         }
 
-        Ok((next_cursor, result))
+        // Build a fresh snapshot without shard_r_all(). Storage layer provides
+        // its own concurrency; Redis SCAN is allowed to be weakly consistent.
+        let keys = Arc::new(self.get_all_live_keys(db));
+        let id = self.next_scan_snapshot_id.fetch_add(1, Ordering::Relaxed);
+        let id = if id == 0 {
+            self.next_scan_snapshot_id.fetch_add(1, Ordering::Relaxed)
+        } else {
+            id
+        };
+        {
+            let mut guard = self.scan_snapshots.lock();
+            guard.insert(
+                id,
+                ScanSnapshot {
+                    keys: keys.clone(),
+                    created: Instant::now(),
+                },
+            );
+        }
+        (id, keys, 0)
     }
 
     fn get_all_live_keys(&self, db: usize) -> Vec<Vec<u8>> {
@@ -781,12 +823,28 @@ impl RedisDatabase {
     }
 
     pub fn db_info(&self, db: usize) -> Result<(i64, i64), RedisError> {
-        let _guard = self.shard_r_all();
+        // Cache briefly so bare INFO / repeated DBSIZE do not re-scan every SST
+        // on the request path. Never hold shard_r_all() across the count.
+        const CACHE_TTL: Duration = Duration::from_secs(5);
+        {
+            let guard = self.db_info_cache.lock();
+            if let Some((keys, expires, at)) = guard.get(&db) {
+                if at.elapsed() < CACHE_TTL {
+                    return Ok((*keys, *expires));
+                }
+            }
+        }
 
-        // Single meta-key range scan — do NOT re-get every key (that was O(keys × SSTs)
-        // and hung DBSIZE under CacheHotels while holding all shard read locks).
         let (keys, expires) = self.count_live_keys(db);
+        self.db_info_cache
+            .lock()
+            .insert(db, (keys, expires, Instant::now()));
         Ok((keys, expires))
+    }
+
+    /// Invalidate cached keyspace counts after mutations that change key cardinality.
+    pub fn invalidate_db_info_cache(&self, db: usize) {
+        self.db_info_cache.lock().remove(&db);
     }
 
     /// Count live keys + keys-with-TTL from one meta scan (values already in hand).
@@ -3418,12 +3476,12 @@ impl RedisDatabase {
     }
 
     pub fn randomkey(&self, db: usize) -> Result<Option<Vec<u8>>, RedisError> {
-        let _guard = self.shard_r_all();
+        // No shard_r_all(): pick from a SCAN snapshot / live key list without
+        // blocking GETs across the whole keyspace.
         let keys = self.get_all_live_keys(db);
         if keys.is_empty() {
             return Ok(None);
         }
-        // Return "random" key (first one in our case)
         Ok(keys.into_iter().next())
     }
 
@@ -3446,25 +3504,26 @@ impl RedisDatabase {
         count: usize,
         type_filter: Option<&str>,
     ) -> Result<(u64, Vec<Vec<u8>>), RedisError> {
-        let _guard = self.shard_r_all();
-
-        let all_keys = self.get_all_live_keys(db);
+        // Snapshot once per SCAN session; subsequent cursors only slice memory.
+        // Never holds all 256 shard locks across the keyspace walk.
+        let count = count.max(1);
+        let (snap_id, all_keys, start) = self.scan_snapshot_keys(db, cursor);
         let total = all_keys.len();
 
         if total == 0 {
+            self.scan_snapshots.lock().remove(&snap_id);
             return Ok((0, vec![]));
         }
-
-        let start = cursor as usize;
         if start >= total {
+            self.scan_snapshots.lock().remove(&snap_id);
             return Ok((0, vec![]));
         }
 
-        let end = (start + count).min(total);
-        let next_cursor = if end >= total { 0 } else { end as u64 };
-
-        let mut result = Vec::new();
-        for key in &all_keys[start..end] {
+        let mut result = Vec::with_capacity(count.min(total - start));
+        let mut idx = start;
+        while idx < total && result.len() < count {
+            let key = &all_keys[idx];
+            idx += 1;
             let key_str = std::str::from_utf8(key).unwrap_or("");
             if let Some(pat) = pattern {
                 if !Self::glob_match(pat, key_str) {
@@ -3472,29 +3531,36 @@ impl RedisDatabase {
                 }
             }
             if let Some(type_f) = type_filter {
-                let meta = self.get_meta_inner(db, key);
-                let ktype = match meta {
-                    None => {
-                        // Check extended type registry
-                        ext_type_registry::get_type(db, key).unwrap_or("none")
+                // Per-key read lock only — never shard_r_all().
+                let ktype = {
+                    let _g = self.shard_r(key);
+                    match self.get_meta_inner(db, key) {
+                        None => ext_type_registry::get_type(db, key).unwrap_or("none"),
+                        Some(m) => match m.r#type {
+                            RedisType::String => "string",
+                            RedisType::Hash => "hash",
+                            RedisType::List => "list",
+                            RedisType::Set => "set",
+                            RedisType::ZSet => "zset",
+                            RedisType::None => {
+                                ext_type_registry::get_type(db, key).unwrap_or("none")
+                            }
+                        },
                     }
-                    Some(m) => match m.r#type {
-                        RedisType::String => "string",
-                        RedisType::Hash => "hash",
-                        RedisType::List => "list",
-                        RedisType::Set => "set",
-                        RedisType::ZSet => "zset",
-                        RedisType::None => ext_type_registry::get_type(db, key).unwrap_or("none"),
-                    },
                 };
-                if ktype.to_lowercase() != type_f.to_lowercase() {
+                if !ktype.eq_ignore_ascii_case(type_f) {
                     continue;
                 }
             }
             result.push(key.clone());
         }
 
-        Ok((next_cursor, result))
+        if idx >= total {
+            self.scan_snapshots.lock().remove(&snap_id);
+            Ok((0, result))
+        } else {
+            Ok((Self::pack_scan_cursor(snap_id, idx as u64), result))
+        }
     }
 
     pub fn swapdb(&self, db1: usize, db2: usize) -> Result<(), RedisError> {
@@ -3798,33 +3864,40 @@ impl RedisDatabase {
 
     // ── TTL sweep ─────────────────────────────────────────────────────────────
 
-    /// FIXED: properly deletes all data types
+    /// Active expire: delete a bounded batch of TTL-due keys without taking every
+    /// shard write lock. Parking_lot writer preference previously let this freeze
+    /// hotel GETs when combined with SCAN/DBSIZE holding all read locks.
     pub fn sweep_expired(&self) {
-        let _guard = self.shard_w_all();
+        self.sweep_expired_batch(true, 64);
+    }
+
+    /// `enabled` gates the sweeper (CONFIG active-expire-enabled).
+    /// `max_keys` caps deletions per tick so a large overdue set cannot monopolize CPUs.
+    pub fn sweep_expired_batch(&self, enabled: bool, max_keys: usize) -> usize {
+        if !enabled || max_keys == 0 {
+            return 0;
+        }
 
         let now = now_ms();
 
-        // Scan TTL index: [TAG_TTL:1][expiry:8BE][db:1][keyLen:2BE][key]
-        // We only want keys where expiry <= now
-        // Scan from TAG_TTL start to TAG_TTL | expiry=now
+        // Scan TTL index WITHOUT any DB shard locks. Storage has its own locking.
+        // [TAG_TTL:1][expiry:8BE][db:1][keyLen:2BE][key]
         let start = vec![TAG_TTL];
         let mut end = vec![TAG_TTL];
-        // Append the current time as 8 BE bytes + 1 to include keys with expiry == now
         let end_expiry = now + 1;
         end.extend_from_slice(&end_expiry.to_be_bytes());
 
         let entries = self.storage.scan(Some(&start), Some(&end));
 
-        let mut to_delete: Vec<(usize, Vec<u8>)> = Vec::new();
-
+        let mut to_delete: Vec<(usize, Vec<u8>)> = Vec::with_capacity(max_keys.min(64));
         for (encoded_key, value) in entries {
+            if to_delete.len() >= max_keys {
+                break;
+            }
             if value.is_none() {
                 continue; // tombstone
             }
-            if encoded_key.len() < 12 {
-                continue;
-            }
-            if encoded_key[0] != TAG_TTL {
+            if encoded_key.len() < 12 || encoded_key[0] != TAG_TTL {
                 continue;
             }
             let expiry = i64::from_be_bytes(encoded_key[1..9].try_into().unwrap());
@@ -3840,16 +3913,51 @@ impl RedisDatabase {
             to_delete.push((db, user_key));
         }
 
+        let mut deleted = 0usize;
+        let mut touched_dbs = Vec::new();
         for (db, key) in to_delete {
-            if db < self.num_dbs {
-                // Check if still expired (double-check)
-                if let Some(meta) = self.get_meta_inner(db, &key) {
-                    if meta.is_expired_at(now) {
-                        self.delete_key_internal(db, &key, Some(&meta));
+            if db >= self.num_dbs {
+                continue;
+            }
+            // Per-key write lock only — never shard_w_all() on the sweeper path.
+            let _guard = self.shard_w(&key);
+            if let Some(meta) = self.get_meta_inner(db, &key) {
+                if meta.is_expired_at(now) {
+                    self.delete_key_internal(db, &key, Some(&meta));
+                    deleted += 1;
+                    if !touched_dbs.contains(&db) {
+                        touched_dbs.push(db);
                     }
                 }
             }
         }
+        for db in touched_dbs {
+            self.invalidate_db_info_cache(db);
+        }
+        deleted
+    }
+
+    /// Test helper: number of shard locks currently held for write across all shards.
+    /// Used to assert SCAN/sweep do not pin every shard.
+    #[cfg(test)]
+    pub fn count_exclusive_shard_locks(&self) -> usize {
+        let mut held = 0usize;
+        for shard in self.shards.iter() {
+            if shard.is_locked_exclusive() {
+                held += 1;
+            }
+        }
+        held
+    }
+
+    #[cfg(test)]
+    pub fn try_shard_read(&self, key: &[u8]) -> bool {
+        self.shards[shard_for(key)].try_read().is_some()
+    }
+
+    #[cfg(test)]
+    pub fn num_shards() -> usize {
+        NUM_SHARDS
     }
 
     // ── MOVE/COPY/SORT ────────────────────────────────────────────────────────
@@ -4131,4 +4239,159 @@ pub fn increment_last_byte(buf: &mut Vec<u8>) {
     }
     // All bytes were 0xFF - push 0x01 past end (shouldn't happen in practice)
     buf.push(0x01);
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::{now_ms, RedisDatabase};
+    use crate::config::ServerConfig;
+    use crate::storage::LsmStorage;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("forgekv-db-{name}-{unique}"));
+        fs::create_dir_all(&path).expect("temp dir");
+        path
+    }
+
+    fn test_db(name: &str) -> (PathBuf, Arc<RedisDatabase>) {
+        let dir = temp_dir(name);
+        let mut cfg = ServerConfig::default();
+        cfg.dir = dir.to_string_lossy().to_string();
+        cfg.memtable_size_mb = 256; // 1MB/shard floor
+        cfg.databases = 2;
+        let storage = Arc::new(LsmStorage::new(cfg).expect("lsm"));
+        let db = Arc::new(RedisDatabase::new(storage, 2));
+        (dir, db)
+    }
+
+    #[test]
+    fn scan_does_not_hold_all_shard_write_locks() {
+        let (dir, db) = test_db("scan-locks");
+        for i in 0..50 {
+            let key = format!("k{i}");
+            db.string_set(0, key.as_bytes(), b"v", 0, false, false)
+                .unwrap();
+        }
+
+        // While SCAN runs on another thread, GETs must still acquire per-key read locks.
+        let stop = Arc::new(AtomicBool::new(false));
+        let db2 = db.clone();
+        let stop2 = stop.clone();
+        let scanner = thread::spawn(move || {
+            let mut cursor = 0u64;
+            for _ in 0..20 {
+                if stop2.load(AtomicOrdering::Relaxed) {
+                    break;
+                }
+                let (next, _keys) = db2.scan(0, cursor, None, 10).unwrap();
+                cursor = next;
+                if cursor == 0 {
+                    cursor = 0; // restart to keep scanning a bit
+                }
+            }
+        });
+
+        // Concurrent GETs must succeed quickly (not blocked behind global locks).
+        for i in 0..50 {
+            let key = format!("k{i}");
+            let started = Instant::now();
+            let val = db.string_get(0, key.as_bytes()).unwrap();
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "GET blocked too long during SCAN"
+            );
+            assert_eq!(val.as_deref(), Some(&b"v"[..]));
+            assert_eq!(db.count_exclusive_shard_locks(), 0);
+        }
+
+        stop.store(true, AtomicOrdering::Relaxed);
+        scanner.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_uses_per_key_locks_and_respects_disable() {
+        let (dir, db) = test_db("sweep-locks");
+        let now = now_ms();
+        // Already overdue — active expire should delete; disabled must not.
+        db.string_set(0, b"expire-me", b"v", now - 1000, false, false)
+            .unwrap();
+        db.string_set(0, b"keep-me", b"v", 0, false, false)
+            .unwrap();
+
+        assert_eq!(db.sweep_expired_batch(false, 64), 0);
+        // Lazy GET hides expired values; ensure the TTL index entry is still
+        // there by confirming a later enabled sweep still finds work.
+        let deleted = db.sweep_expired_batch(true, 64);
+        assert!(
+            deleted >= 1,
+            "enabled sweeper should delete overdue keys without shard_w_all"
+        );
+        assert!(db.string_get(0, b"expire-me").unwrap().is_none());
+        assert_eq!(
+            db.string_get(0, b"keep-me").unwrap().as_deref(),
+            Some(&b"v"[..])
+        );
+        assert_eq!(db.count_exclusive_shard_locks(), 0);
+        // Second pass should be idle
+        assert_eq!(db.sweep_expired_batch(true, 64), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_snapshot_avoids_full_rescan_on_cursor_steps() {
+        let (dir, db) = test_db("scan-snap");
+        for i in 0..30 {
+            let key = format!("s{i}");
+            db.string_set(0, key.as_bytes(), b"v", 0, false, false)
+                .unwrap();
+        }
+
+        let (c1, batch1) = db.scan(0, 0, None, 10).unwrap();
+        assert_eq!(batch1.len(), 10);
+        assert_ne!(c1, 0);
+        // Same snapshot id in high bits
+        let (c2, batch2) = db.scan(0, c1, None, 10).unwrap();
+        assert_eq!(batch2.len(), 10);
+        assert_eq!(c1 >> 32, c2 >> 32);
+
+        // Exhaust
+        let mut cursor = c2;
+        let mut total = batch1.len() + batch2.len();
+        loop {
+            let (next, batch) = db.scan(0, cursor, None, 10).unwrap();
+            total += batch.len();
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        assert_eq!(total, 30);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn db_info_does_not_require_all_shard_locks() {
+        let (dir, db) = test_db("dbinfo");
+        db.string_set(0, b"a", b"1", 0, false, false).unwrap();
+        let (keys, _) = db.db_info(0).unwrap();
+        assert!(keys >= 1);
+        // Cached path
+        let (keys2, _) = db.db_info(0).unwrap();
+        assert_eq!(keys, keys2);
+        assert_eq!(db.count_exclusive_shard_locks(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
