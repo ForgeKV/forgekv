@@ -926,6 +926,21 @@ impl RedisDatabase {
         self.storage.compact_now();
     }
 
+    pub fn compact_full_start(
+        &self,
+        cfg: crate::storage::full_compaction::FullCompactConfig,
+    ) -> Result<(), String> {
+        self.storage.compact_full_start(cfg)
+    }
+
+    pub fn compact_full_stop(&self) -> bool {
+        self.storage.compact_full_stop()
+    }
+
+    pub fn compact_full_status(&self) -> Vec<(String, String)> {
+        self.storage.compact_full_status()
+    }
+
     pub fn flush_all(&self) -> Result<(), RedisError> {
         let _guard = self.shard_w_all();
 

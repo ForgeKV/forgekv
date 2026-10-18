@@ -124,8 +124,46 @@ FORGEKV.DECOMPRESS [RATE keys/sec] [DB n] [LIMIT n] [RESUME]      (same sub-comm
 * Only values stored as plain raw are compressed. Values already compressed, below `min-size`,
   incompressible, or escaped magic-prefixed values are left unchanged.
 * **Disk space:** rewriting adds new data to the WAL/SSTs; old versions are reclaimed only by LSM compaction
-  (run `COMPACT` after the job). Make sure there is free disk for the transient overhead before running it on a
+  (normal `COMPACT` is threshold driven and may not touch deep levels for a long time; use `COMPACT FULL`
+  from 0.3.1, see below). Make sure there is free disk for the transient overhead before running it on a
   large data set, and take a backup/snapshot first.
+
+## Reclaiming disk after a migration: `COMPACT FULL` (0.3.1+)
+
+Rewriting values leaves the old (raw) versions in deep SST levels, shadowed by the new compressed versions in
+shallower levels. Regular compaction only runs when a level exceeds its size threshold (L0 >= 64 files, L3 > 16 GB,
+L4 > 64 GB), so the space can stay allocated for a very long time and plain `COMPACT` returns without doing work.
+
+```
+COMPACT FULL [DRYRUN] [RATE <MB/s>] [MINFREE <GB>]     start a background job (default RATE 64, MINFREE 30)
+COMPACT FULL STATUS                                    progress counters (also in INFO as compaction_full_*)
+COMPACT FULL STOP                                      stop after the current file; just run it again to continue
+COMPACT                                                unchanged: normal threshold-driven compaction
+```
+
+How it works (bounded I/O, no 2x datadir copy):
+
+* It processes SST files of levels >= 1 **one at a time**, oldest level first. L0 is never touched.
+* From each file it drops entries that are *shadowed* (a file that GET consults earlier - L0, a shallower level, or an
+  earlier file in the same level - holds the same key as value or tombstone) and tombstones for which no older version
+  remains below. GET precedence is mirrored exactly, so every GET/SCAN result is identical before and after.
+* The survivors are written to a new file that takes the **same position** in the MANIFEST; the MANIFEST is replaced
+  atomically (write + rename), and the old file is deleted after a short grace period so in-flight reads never lose a
+  file. Peak extra disk is about one SST (<= ~64 MB). A fully shadowed file is simply removed.
+* Each file is a short critical section on the same single-flight lock as normal compaction; flushes, writes and normal
+  compaction continue in between. New writes always land in the memtable/L0, which are newer than anything the job
+  touches, so concurrent client writes always win.
+* Throttled by `RATE` (MB/s of input). The job aborts (`state:aborted_low_disk`) when free disk drops below `MINFREE`,
+  and refuses to start below it. `DRYRUN` reads everything but writes nothing and reports the projected savings in
+  `bytes_reclaimed`.
+* Files with nothing to drop are not rewritten, so a second run is cheap and idempotent. Because the job is stateless,
+  "resume" after `STOP`, an abort or a restart is simply `COMPACT FULL` again.
+* If the process is killed mid-file, the MANIFEST is still consistent; at worst one unreferenced `*.sst`/`*.tmp` file
+  stays on disk and can be deleted by hand (any `.sst` not listed in `MANIFEST`).
+
+`INFO` fields: `compaction_full_state` (idle/running/completed/stopped/aborted_low_disk), `_files_total/_done/
+_rewritten/_deleted/_unchanged/_failed`, `_entries_scanned/_kept`, `_dropped_shadowed`, `_dropped_tombstones`,
+`_bytes_read/_written/_reclaimed`, `_current_file`, `_last_error`, `_rate_mb_s`, `_min_free_bytes`.
 
 ## Observability (`INFO compression`, also part of `INFO`)
 
@@ -153,7 +191,8 @@ traffic since process start; ForgeKV does not maintain a live per-key inventory.
 3. **Enable writes.** `CONFIG SET value-compression zstd` (and put it in `forgekv.conf`). New and refreshed values
    are compressed. Watch `INFO compression`, latency and CPU.
 4. **Migrate existing data off-peak**, never inside the web/app container: `FORGEKV.COMPRESS DRYRUN` first,
-   then `FORGEKV.COMPRESS RATE <n>`, watching `STATUS`, disk and latency; `STOP`/`RESUME` as needed; `COMPACT` afterwards.
+   then `FORGEKV.COMPRESS RATE <n>`, watching `STATUS`, disk and latency; `STOP`/`RESUME` as needed; afterwards
+   `COMPACT FULL DRYRUN` and `COMPACT FULL` (0.3.1+) to give the space of the old raw versions back.
 5. **Rollback:** `CONFIG SET value-compression off` (stops new compressed writes; compressed values stay
    readable). To fully revert (or before rolling back to a pre-0.3 binary): `FORGEKV.DECOMPRESS`, wait for
    `state:completed`, `keys_error:0`.

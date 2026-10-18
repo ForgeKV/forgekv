@@ -81,7 +81,10 @@ impl Manifest {
             }
         }
 
-        fs::write(&self.path, content)?;
+        // Write-then-rename so a crash can never leave a truncated MANIFEST.
+        let tmp = self.path.with_extension("tmp");
+        fs::write(&tmp, content)?;
+        fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
@@ -119,6 +122,33 @@ impl Manifest {
         if level < levels.len() {
             levels[level].retain(|f| f != path);
         }
+    }
+
+    /// Replace `old` by `new` at the SAME position inside `level` (or just remove `old` when
+    /// `new` is None). Keeping the position preserves the read-precedence order used by GET.
+    /// Returns false (and changes nothing) if `old` is not in the level.
+    pub fn replace_in_place(&self, level: usize, old: &str, new: Option<String>) -> bool {
+        let mut levels = self.levels.lock();
+        if level >= levels.len() {
+            return false;
+        }
+        match levels[level].iter().position(|f| f == old) {
+            Some(idx) => {
+                match new {
+                    Some(n) => levels[level][idx] = n,
+                    None => {
+                        levels[level].remove(idx);
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Snapshot of every level (index = level).
+    pub fn snapshot(&self) -> Vec<Vec<String>> {
+        self.levels.lock().clone()
     }
 
     pub fn replace_files(

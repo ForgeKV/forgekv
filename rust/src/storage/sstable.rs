@@ -233,6 +233,48 @@ impl SSTableReader {
         self.search_block(*offset as usize, *size as usize, key)
     }
 
+    /// Presence check that mirrors `get` exactly (same bloom/index/block search) but never
+    /// copies the value out: `Some(true)` = a value is stored, `Some(false)` = a tombstone,
+    /// `None` = the key is not in this file. Used by the full-compaction shadow check.
+    pub fn lookup(&self, key: &[u8]) -> Option<bool> {
+        if !self.bloom.may_contain(key) {
+            return None;
+        }
+        let block_idx = self.find_block(key)?;
+        let (_, offset, size) = &self.index[block_idx];
+        let block = &self.mmap[*offset as usize..*offset as usize + *size as usize];
+        let mut pos = 0;
+        while pos + 5 <= block.len() {
+            let key_len = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 5;
+            if pos + key_len > block.len() {
+                break;
+            }
+            let entry_key = &block[pos..pos + key_len];
+            pos += key_len;
+            if pos + 5 > block.len() {
+                break;
+            }
+            let val_len_raw = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap());
+            pos += 5;
+            if val_len_raw == 0xFFFFFFFF {
+                if entry_key == key {
+                    return Some(false);
+                }
+            } else {
+                let val_len = val_len_raw as usize;
+                if pos + val_len > block.len() {
+                    break;
+                }
+                if entry_key == key {
+                    return Some(true);
+                }
+                pos += val_len;
+            }
+        }
+        None
+    }
+
     /// Find first block whose lastKey >= key
     fn find_block(&self, key: &[u8]) -> Option<usize> {
         let mut lo = 0usize;
