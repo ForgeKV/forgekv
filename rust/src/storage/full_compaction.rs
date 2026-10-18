@@ -850,6 +850,62 @@ mod tests {
         }
     }
 
+    /// Deep level with many overlapping files (like prod: ~1000 L4 files shadowed by L2/L3):
+    /// GET results for every key must be identical before/after and space must be reclaimed.
+    #[test]
+    fn many_files_in_deep_levels_reads_identical_and_space_reclaimed() {
+        let f = fixture("scale");
+        let n = 6000u32;
+        let val = |tag: &str, i: u32| format!("{tag}-{i}-{}", "v".repeat(400)).into_bytes();
+        // L4: 60 files of old versions of every key (interleaved key ranges, like repeated promotions)
+        for part in 0..60u32 {
+            let m: Entries = (0..n).filter(|i| i % 60 == part).map(|i| (format!("key{i:05}").into_bytes(), Some(val("old", i)))).collect();
+            f.add_map(4, &m);
+        }
+        // L3: 10 files with newer versions of 2/3 of the keys, overlapping ranges
+        for part in 0..10u32 {
+            let m: Entries = (0..n).filter(|i| i % 3 != 0 && i % 10 == part).map(|i| (format!("key{i:05}").into_bytes(), Some(val("new", i)))).collect();
+            f.add_map(3, &m);
+        }
+        // L2: tombstones for some keys, even newer versions for others
+        let mut m: Entries = BTreeMap::new();
+        for i in (0..n).filter(|i| i % 7 == 0) { m.insert(format!("key{i:05}").into_bytes(), None); }
+        for i in (0..n).filter(|i| i % 11 == 0 && i % 7 != 0) { m.insert(format!("key{i:05}").into_bytes(), Some(val("newest", i))); }
+        f.add_map(2, &m);
+        // L0: freshest overrides
+        let mut m0: Entries = BTreeMap::new();
+        for i in (0..n).filter(|i| i % 13 == 0) { m0.insert(format!("key{i:05}").into_bytes(), Some(val("l0", i))); }
+        f.add_map(0, &m0);
+
+        let all: Vec<String> = (0..n + 50).map(|i| format!("key{i:05}")).collect();
+        let before: Vec<_> = all.iter().map(|k| f.get(k)).collect();
+        let bytes_before = f.disk_bytes();
+        let t0 = Instant::now();
+        let p = f.run(cfg());
+        let took = t0.elapsed();
+        let after: Vec<_> = all.iter().map(|k| f.get(k)).collect();
+        assert_eq!(before, after, "every GET must be identical");
+        assert_eq!(st(&p, "state"), "completed");
+        assert_eq!(st(&p, "files_failed"), "0");
+        assert!(f.disk_bytes() < bytes_before * 7 / 10, "{} -> {}", bytes_before, f.disk_bytes());
+        // only live versions remain: exactly one entry per surviving key across all levels
+        let mut live = std::collections::HashSet::new();
+        let mut dups = 0;
+        for lvl in 0..7 {
+            for file in f.manifest.get_level(lvl) {
+                let r = SSTableReader::open(&f.dir.join(file)).unwrap();
+                for (k, v) in r.scan(None, None) {
+                    if !live.insert(k) { dups += 1; }
+                    let _ = v;
+                }
+            }
+        }
+        assert_eq!(dups, 0, "no shadowed duplicate may remain");
+        assert!(took < Duration::from_secs(30));
+        let in_manifest: usize = f.manifest.snapshot().iter().map(|l| l.len()).sum();
+        assert_eq!(in_manifest, f.sst_files_on_disk());
+    }
+
     #[test]
     fn survives_restart_through_manifest_and_lsm_storage() {
         use crate::config::ServerConfig;
