@@ -25,6 +25,26 @@ A compressed form is kept only if it is at least **10 % smaller** (including the
 (already compressed, encrypted, images) therefore costs one failed compression
 attempt per write and no space/latency penalty on reads.
 
+### Environment variables (Docker / compose)
+
+The same settings can be given as environment variables. **Env overrides `forgekv.conf`**; an unset or
+empty variable leaves the file value untouched. An **invalid value is a fatal startup error** (exit code 2,
+message on stderr) so a typo can never silently run with the wrong mode.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FORGEKV_VALUE_COMPRESSION` | `off` | `off` or `zstd` |
+| `FORGEKV_VALUE_COMPRESSION_LEVEL` | `3` | integer 1–19 |
+| `FORGEKV_VALUE_COMPRESSION_MIN_SIZE` | `512` | bytes (`512`, `1kb`, ...) |
+| `FORGEKV_COMPRESS_ON_START` | `off` | `on` starts a throttled `FORGEKV.COMPRESS` ~5 s after startup (requires `zstd`; otherwise a startup error) |
+| `FORGEKV_COMPRESS_RATE` | `200` | keys/sec for the start-up job (`0` = unlimited) |
+
+The repo `docker-compose.yml` exposes them as `${FORGEKV_VALUE_COMPRESSION:-off}` etc., so
+`FORGEKV_VALUE_COMPRESSION=zstd docker compose up -d` (or a `.env` file) turns it on.
+The start-up job is idempotent (converted keys are skipped), so a restart simply continues it, but its
+progress is only visible through `FORGEKV.COMPRESS STATUS` / `INFO compression`. For a large production data
+set prefer running `FORGEKV.COMPRESS DRYRUN` and then `FORGEKV.COMPRESS RATE <n>` manually and watching it.
+
 `CONFIG SET value-compression <bad value>` is rejected with an error (it never
 silently flips the mode). Invalid values in `forgekv.conf` print a warning and
 fall back to the defaults.

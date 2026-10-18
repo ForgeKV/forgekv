@@ -79,6 +79,11 @@ pub struct ServerConfig {
     pub value_compression: CompressionMode,
     pub value_compression_level: i32,
     pub value_compression_min_size: u64,
+    /// Start a throttled `FORGEKV.COMPRESS` migration automatically after startup
+    /// (env `FORGEKV_COMPRESS_ON_START`; off by default). Requires `value-compression zstd`.
+    pub compress_on_start: bool,
+    /// Keys/second for the automatic start-up migration (env `FORGEKV_COMPRESS_RATE`).
+    pub compress_rate: u64,
 
     // Replication
     pub repl_backlog_size: u64,
@@ -197,6 +202,8 @@ impl Default for ServerConfig {
             value_compression: CompressionMode::Off,
             value_compression_level: compression::DEFAULT_LEVEL,
             value_compression_min_size: compression::DEFAULT_MIN_SIZE as u64,
+            compress_on_start: false,
+            compress_rate: 200,
             repl_backlog_size: 1048576,
             repl_diskless_sync: true,
             repl_diskless_sync_delay: 5,
@@ -456,6 +463,94 @@ impl ConfigParser {
     }
 }
 
+/// Strict variant of [`parse_memory_size`]: `None` when the string is not a valid size.
+pub fn parse_memory_size_strict(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    let (num, mult): (&str, u64) = if let Some(n) = s.strip_suffix("gb") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("kb") {
+        (n, 1024)
+    } else if let Some(n) = s.strip_suffix('b') {
+        (n, 1)
+    } else {
+        (s.as_str(), 1)
+    };
+    num.trim().parse::<u64>().ok()?.checked_mul(mult)
+}
+
+/// Environment variables that override the corresponding settings of the config file.
+///
+/// | variable | meaning |
+/// |---|---|
+/// | `FORGEKV_VALUE_COMPRESSION` | `off` \| `zstd` |
+/// | `FORGEKV_VALUE_COMPRESSION_LEVEL` | zstd level (1-19) |
+/// | `FORGEKV_VALUE_COMPRESSION_MIN_SIZE` | bytes (`512`, `1kb`, ...) |
+/// | `FORGEKV_COMPRESS_ON_START` | `on`/`off` — start a throttled migration after startup |
+/// | `FORGEKV_COMPRESS_RATE` | keys/sec for that migration (0 = unlimited) |
+///
+/// An unset or empty variable leaves the config-file value untouched. An invalid value is a hard
+/// error (never silently ignored): the caller prints it and refuses to start.
+pub fn apply_env_overrides<F>(config: &mut ServerConfig, get: F) -> Result<(), String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let val = |name: &str| -> Option<String> {
+        get(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    };
+    if let Some(v) = val("FORGEKV_VALUE_COMPRESSION") {
+        config.value_compression = CompressionMode::parse(&v).ok_or_else(|| {
+            format!("invalid FORGEKV_VALUE_COMPRESSION '{}' (expected off|zstd)", v)
+        })?;
+    }
+    if let Some(v) = val("FORGEKV_VALUE_COMPRESSION_LEVEL") {
+        config.value_compression_level = compression::parse_level(&v).ok_or_else(|| {
+            format!(
+                "invalid FORGEKV_VALUE_COMPRESSION_LEVEL '{}' (expected integer {}-{})",
+                v,
+                compression::MIN_LEVEL,
+                compression::MAX_LEVEL
+            )
+        })?;
+    }
+    if let Some(v) = val("FORGEKV_VALUE_COMPRESSION_MIN_SIZE") {
+        config.value_compression_min_size = parse_memory_size_strict(&v).ok_or_else(|| {
+            format!(
+                "invalid FORGEKV_VALUE_COMPRESSION_MIN_SIZE '{}' (expected bytes, e.g. 512, 1kb)",
+                v
+            )
+        })?;
+    }
+    if let Some(v) = val("FORGEKV_COMPRESS_ON_START") {
+        config.compress_on_start = match v.to_ascii_lowercase().as_str() {
+            "on" | "yes" | "true" | "1" => true,
+            "off" | "no" | "false" | "0" => false,
+            _ => {
+                return Err(format!(
+                    "invalid FORGEKV_COMPRESS_ON_START '{}' (expected on|off)",
+                    v
+                ))
+            }
+        };
+    }
+    if let Some(v) = val("FORGEKV_COMPRESS_RATE") {
+        config.compress_rate = v.parse::<u64>().map_err(|_| {
+            format!(
+                "invalid FORGEKV_COMPRESS_RATE '{}' (expected non-negative integer keys/sec)",
+                v
+            )
+        })?;
+    }
+    if config.compress_on_start && config.value_compression == CompressionMode::Off {
+        return Err(
+            "FORGEKV_COMPRESS_ON_START=on requires value compression to be enabled (FORGEKV_VALUE_COMPRESSION=zstd)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Parse Redis memory size strings like "512mb", "1gb", "100000"
 pub fn parse_memory_size(s: &str) -> u64 {
     let s = s.to_lowercase();
@@ -469,5 +564,100 @@ pub fn parse_memory_size(s: &str) -> u64 {
         s[..s.len() - 1].parse::<u64>().unwrap_or(0)
     } else {
         s.parse::<u64>().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn run(cfg: &mut ServerConfig, pairs: &[(&str, &str)]) -> Result<(), String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        apply_env_overrides(cfg, |k| m.get(k).cloned())
+    }
+
+    #[test]
+    fn unset_or_empty_keeps_file_values() {
+        let mut c = ServerConfig::default();
+        c.value_compression = CompressionMode::Zstd;
+        c.value_compression_level = 7;
+        run(&mut c, &[("FORGEKV_VALUE_COMPRESSION", "  ")]).unwrap();
+        assert_eq!(c.value_compression, CompressionMode::Zstd);
+        assert_eq!(c.value_compression_level, 7);
+        assert!(!c.compress_on_start);
+    }
+
+    #[test]
+    fn env_overrides_file() {
+        let mut c = ServerConfig::default();
+        c.value_compression = CompressionMode::Off;
+        c.value_compression_level = 9;
+        run(
+            &mut c,
+            &[
+                ("FORGEKV_VALUE_COMPRESSION", "ZSTD"),
+                ("FORGEKV_VALUE_COMPRESSION_LEVEL", "3"),
+                ("FORGEKV_VALUE_COMPRESSION_MIN_SIZE", "1kb"),
+                ("FORGEKV_COMPRESS_ON_START", "on"),
+                ("FORGEKV_COMPRESS_RATE", "50"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.value_compression, CompressionMode::Zstd);
+        assert_eq!(c.value_compression_level, 3);
+        assert_eq!(c.value_compression_min_size, 1024);
+        assert!(c.compress_on_start);
+        assert_eq!(c.compress_rate, 50);
+        // env can also switch compression off over a file that enabled it
+        run(&mut c, &[("FORGEKV_VALUE_COMPRESSION", "off"), ("FORGEKV_COMPRESS_ON_START", "off")]).unwrap();
+        assert_eq!(c.value_compression, CompressionMode::Off);
+    }
+
+    #[test]
+    fn defaults_are_off_3_512() {
+        let c = ServerConfig::default();
+        assert_eq!(c.value_compression, CompressionMode::Off);
+        assert_eq!(c.value_compression_level, 3);
+        assert_eq!(c.value_compression_min_size, 512);
+        assert!(!c.compress_on_start);
+    }
+
+    #[test]
+    fn invalid_values_are_errors() {
+        for (k, v) in [
+            ("FORGEKV_VALUE_COMPRESSION", "gzip"),
+            ("FORGEKV_VALUE_COMPRESSION_LEVEL", "0"),
+            ("FORGEKV_VALUE_COMPRESSION_LEVEL", "abc"),
+            ("FORGEKV_VALUE_COMPRESSION_LEVEL", "99"),
+            ("FORGEKV_VALUE_COMPRESSION_MIN_SIZE", "lots"),
+            ("FORGEKV_VALUE_COMPRESSION_MIN_SIZE", "-5"),
+            ("FORGEKV_COMPRESS_ON_START", "maybe"),
+            ("FORGEKV_COMPRESS_RATE", "-1"),
+        ] {
+            let mut c = ServerConfig::default();
+            let e = run(&mut c, &[(k, v)]).unwrap_err();
+            assert!(e.contains(k), "{e}");
+        }
+    }
+
+    #[test]
+    fn compress_on_start_requires_compression() {
+        let mut c = ServerConfig::default();
+        assert!(run(&mut c, &[("FORGEKV_COMPRESS_ON_START", "on")]).is_err());
+        let mut c = ServerConfig::default();
+        run(&mut c, &[("FORGEKV_COMPRESS_ON_START", "on"), ("FORGEKV_VALUE_COMPRESSION", "zstd")]).unwrap();
+    }
+
+    #[test]
+    fn strict_size_parser() {
+        assert_eq!(parse_memory_size_strict("512"), Some(512));
+        assert_eq!(parse_memory_size_strict("2KB"), Some(2048));
+        assert_eq!(parse_memory_size_strict("1mb"), Some(1 << 20));
+        assert_eq!(parse_memory_size_strict("x"), None);
+        assert_eq!(parse_memory_size_strict(""), None);
     }
 }

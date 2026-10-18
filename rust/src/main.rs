@@ -551,6 +551,16 @@ fn register_all(
 }
 
 fn load_config() -> ServerConfig {
+    let mut cfg = load_config_file();
+    // Environment overrides (FORGEKV_VALUE_COMPRESSION*, FORGEKV_COMPRESS_*): env wins over the file.
+    if let Err(e) = config::apply_env_overrides(&mut cfg, |k| std::env::var(k).ok()) {
+        eprintln!("FATAL: {}", e);
+        std::process::exit(2);
+    }
+    cfg
+}
+
+fn load_config_file() -> ServerConfig {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--config" {
         match config::ConfigParser::parse_file(&args[2]) {
@@ -650,6 +660,28 @@ async fn async_main(base_config: ServerConfig) {
     );
 
     register_all(registry.clone(), db.clone(), hub, config.clone(), acl, &tcp_server);
+
+    // Optional: throttled in-place migration of existing raw values after startup
+    // (FORGEKV_COMPRESS_ON_START=on). Off by default. Resumable/idempotent: already
+    // converted keys are skipped, so a restart simply continues the work.
+    if base_config.compress_on_start && base_config.value_compression != compression::CompressionMode::Off {
+        let db_for_job = db.clone();
+        let rate = base_config.compress_rate;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let cfg = compress_job::JobConfig {
+                direction: compress_job::Direction::Compress,
+                dry_run: false,
+                rate,
+                db: None,
+                limit: 0,
+            };
+            match compress_job::start(&db_for_job, cfg, false) {
+                Ok(()) => eprintln!("Started background compression migration (rate {} keys/sec)", rate),
+                Err(e) => eprintln!("WARNING: could not start background compression migration: {}", e),
+            }
+        });
+    }
 
     // TTL sweeper — respects active-expire-enabled, never takes all shard write
     // locks, and runs on the blocking pool so it cannot pin a tokio worker.
