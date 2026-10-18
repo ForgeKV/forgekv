@@ -3,6 +3,8 @@
 mod acl;
 mod blocking;
 mod commands;
+mod compress_job;
+mod compression;
 mod config;
 mod database;
 mod ext_type_registry;
@@ -414,9 +416,18 @@ fn register_all(
     }));
     registry.register(Arc::new(DbSizeCommand { db: db.clone() }));
     registry.register(Arc::new(CompactCommand { db: db.clone() }));
+    registry.register(Arc::new(CompressMigrationCommand {
+        db: db.clone(),
+        direction: compress_job::Direction::Compress,
+    }));
+    registry.register(Arc::new(CompressMigrationCommand {
+        db: db.clone(),
+        direction: compress_job::Direction::Decompress,
+    }));
     registry.register(Arc::new(CommandCommand));
     registry.register(Arc::new(EchoCommand));
     registry.register(Arc::new(ConfigCommand {
+        db: db.clone(),
         config: config.clone(),
     }));
 
@@ -615,6 +626,18 @@ async fn async_main(base_config: ServerConfig) {
 
     let num_dbs = base_config.databases;
     let db = Arc::new(RedisDatabase::new(storage.clone(), num_dbs));
+    {
+        let c = db.compression();
+        c.set_mode(base_config.value_compression);
+        c.set_level(base_config.value_compression_level);
+        c.set_min_size(base_config.value_compression_min_size as usize);
+        eprintln!(
+            "Value compression: {} (level {}, min-size {} bytes)",
+            c.mode().as_str(),
+            c.level(),
+            c.min_size()
+        );
+    }
     let registry = Arc::new(CommandRegistry::new());
     let hub = Arc::new(PubSubHub::new());
 

@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fs;
 
+use crate::compression::{self, CompressionMode};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalSyncMode {
     Always,
@@ -72,6 +74,11 @@ pub struct ServerConfig {
     pub databases: usize,
     pub memtable_size_mb: u64,
     pub wal_sync_mode: WalSyncMode,
+
+    // String value compression (off by default)
+    pub value_compression: CompressionMode,
+    pub value_compression_level: i32,
+    pub value_compression_min_size: u64,
 
     // Replication
     pub repl_backlog_size: u64,
@@ -187,6 +194,9 @@ impl Default for ServerConfig {
             databases: 16,
             memtable_size_mb: 2048,
             wal_sync_mode: WalSyncMode::Everysec,
+            value_compression: CompressionMode::Off,
+            value_compression_level: compression::DEFAULT_LEVEL,
+            value_compression_min_size: compression::DEFAULT_MIN_SIZE as u64,
             repl_backlog_size: 1048576,
             repl_diskless_sync: true,
             repl_diskless_sync_delay: 5,
@@ -312,6 +322,26 @@ impl ConfigParser {
                         "no" => WalSyncMode::No,
                         _ => WalSyncMode::Everysec,
                     }
+                }
+                "value-compression" => match CompressionMode::parse(value) {
+                    Some(m) => config.value_compression = m,
+                    None => eprintln!(
+                        "WARNING: invalid value-compression '{}' (expected off|zstd); using off",
+                        value
+                    ),
+                },
+                "value-compression-level" => match compression::parse_level(value) {
+                    Some(l) => config.value_compression_level = l,
+                    None => eprintln!(
+                        "WARNING: invalid value-compression-level '{}' (expected {}-{}); using {}",
+                        value,
+                        compression::MIN_LEVEL,
+                        compression::MAX_LEVEL,
+                        compression::DEFAULT_LEVEL
+                    ),
+                },
+                "value-compression-min-size" => {
+                    config.value_compression_min_size = parse_memory_size(value)
                 }
                 "loglevel" => {
                     config.log_level = match value.to_lowercase().as_str() {
