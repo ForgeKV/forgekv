@@ -521,6 +521,9 @@ impl CommandHandler for InfoCommand {
                 ssts = lsm.total_sst_files,
                 mt = lsm.memtable_shard_bytes,
             ));
+            for (k, v) in self.db.compact_full_status() {
+                output.push_str(&format!("compaction_full_{}:{}\r\n", k, v));
+            }
         }
 
         // Stats section
@@ -2130,7 +2133,11 @@ impl CommandHandler for CompactCommand {
     fn name(&self) -> &str {
         "COMPACT"
     }
-    fn execute(&self, _db_index: &mut usize, _args: &[RespValue]) -> RespValue {
+    fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
+        // COMPACT FULL [DRYRUN] [RATE mb/s] [MINFREE gb] | COMPACT FULL STATUS | COMPACT FULL STOP
+        if args.len() > 1 {
+            return self.execute_full(args);
+        }
         // Bounded single-flight compaction; writers no longer run this on SET path.
         self.db.compact_lsm();
         let s = self.db.lsm_stats();
@@ -2146,6 +2153,63 @@ impl CommandHandler for CompactCommand {
             RespValue::bulk_str("compacting"),
             RespValue::integer(if s.compacting { 1 } else { 0 }),
         ]))
+    }
+}
+
+impl CompactCommand {
+    fn execute_full(&self, args: &[RespValue]) -> RespValue {
+        use crate::storage::full_compaction::FullCompactConfig;
+        const USAGE: &str =
+            "ERR syntax error. Usage: COMPACT FULL [DRYRUN] [RATE mb_per_sec] [MINFREE gb] | COMPACT FULL STATUS | COMPACT FULL STOP";
+        if args[1].as_str().map(|s| s.to_uppercase()).as_deref() != Some("FULL") {
+            return RespValue::error(USAGE);
+        }
+        let mut cfg = FullCompactConfig::default();
+        let mut i = 2;
+        while i < args.len() {
+            let tok = args[i].as_str().unwrap_or("").to_uppercase();
+            let num = |i: &mut usize| -> Option<u64> {
+                *i += 1;
+                args.get(*i)?.as_str()?.parse::<u64>().ok()
+            };
+            match tok.as_str() {
+                "STATUS" => {
+                    let mut out = Vec::new();
+                    for (k, v) in self.db.compact_full_status() {
+                        out.push(RespValue::bulk_str(&k));
+                        out.push(RespValue::bulk_str(&v));
+                    }
+                    return RespValue::Array(Some(out));
+                }
+                "STOP" => {
+                    return if self.db.compact_full_stop() {
+                        RespValue::simple("Stop requested; the current file finishes first")
+                    } else {
+                        RespValue::error("ERR no full compaction is running")
+                    };
+                }
+                "DRYRUN" => cfg.dry_run = true,
+                "RATE" => match num(&mut i) {
+                    Some(n) => cfg.rate_mb_s = n,
+                    None => return RespValue::error("ERR RATE needs a non-negative integer (MB/s of input, 0 = unlimited)"),
+                },
+                "MINFREE" => match num(&mut i) {
+                    Some(n) => cfg.min_free_bytes = n.saturating_mul(1024 * 1024 * 1024),
+                    None => return RespValue::error("ERR MINFREE needs a non-negative integer (GB)"),
+                },
+                _ => return RespValue::error(USAGE),
+            }
+            i += 1;
+        }
+        let dry = cfg.dry_run;
+        match self.db.compact_full_start(cfg) {
+            Ok(()) => RespValue::simple(if dry {
+                "Background full-compaction dry run started; poll with COMPACT FULL STATUS"
+            } else {
+                "Background full compaction started; poll with COMPACT FULL STATUS"
+            }),
+            Err(e) => RespValue::error(&e),
+        }
     }
 }
 

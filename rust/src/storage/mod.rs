@@ -1,5 +1,6 @@
 pub mod bloom;
 pub mod compaction;
+pub mod full_compaction;
 pub mod key_encoding;
 pub mod lsm;
 pub mod manifest;

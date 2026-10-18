@@ -30,13 +30,15 @@ const LEVEL_MAX_BYTES: [u64; 7] = [
 ];
 
 pub struct Compaction {
-    data_dir: PathBuf,
-    manifest: Arc<Manifest>,
-    open_readers: RwLock<HashMap<String, Arc<SSTableReader>>>,
+    pub(super) data_dir: PathBuf,
+    pub(super) manifest: Arc<Manifest>,
+    pub(super) open_readers: RwLock<HashMap<String, Arc<SSTableReader>>>,
     /// Prevent overlapping compaction passes (bg thread + post-flush).
-    compacting: AtomicBool,
+    pub(super) compacting: AtomicBool,
     /// Set by flush worker; bg compaction thread clears and runs.
     compact_requested: AtomicBool,
+    /// State of the optional throttled `COMPACT FULL` job (see full_compaction.rs).
+    pub(super) full: super::full_compaction::FullState,
 }
 
 impl Compaction {
@@ -47,6 +49,7 @@ impl Compaction {
             open_readers: RwLock::new(HashMap::new()),
             compacting: AtomicBool::new(false),
             compact_requested: AtomicBool::new(false),
+            full: super::full_compaction::FullState::default(),
         }
     }
 

@@ -485,6 +485,22 @@ impl LsmStorage {
         self.compaction.maybe_compact();
     }
 
+    /// `COMPACT FULL`: start the throttled shadowed-version GC (see full_compaction.rs).
+    pub fn compact_full_start(
+        &self,
+        cfg: super::full_compaction::FullCompactConfig,
+    ) -> Result<(), String> {
+        self.compaction.full_start(cfg)
+    }
+
+    pub fn compact_full_stop(&self) -> bool {
+        self.compaction.full_request_stop()
+    }
+
+    pub fn compact_full_status(&self) -> Vec<(String, String)> {
+        self.compaction.full_status_pairs()
+    }
+
     /// Batch write: group entries by shard, write each group under one WAL lock.
     /// Used by MSET and other multi-key write commands.
     pub fn put_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) {

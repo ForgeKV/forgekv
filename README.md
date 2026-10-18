@@ -198,6 +198,8 @@ String values can be transparently compressed with zstd (`value-compression zstd
 level 1-19, min size, >=10 % saving required). It is **off by default**, reads always
 decode both formats, and existing data can be converted in place with the throttled,
 resumable `FORGEKV.COMPRESS` job (with `DRYRUN`) and rolled back with `FORGEKV.DECOMPRESS`.
+Since 0.3.1 `COMPACT FULL [DRYRUN] [RATE mb/s] [MINFREE gb]` reclaims the disk held by old shadowed versions
+after a migration (file-by-file, throttled, disk-guarded, `COMPACT FULL STATUS|STOP`; plain `COMPACT` is unchanged).
 Binaries older than 0.3.0 cannot read compressed values - see
 [docs/value-compression.md](docs/value-compression.md) for the format, the rollout order and the risks.
 
