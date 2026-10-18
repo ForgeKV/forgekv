@@ -1,4 +1,5 @@
-FROM rust:latest AS build
+# Build on the same Debian release as the runtime stage (glibc must match).
+FROM rust:1-bookworm AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
