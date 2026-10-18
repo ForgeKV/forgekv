@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 
+use crate::compression::{self, CompressionSettings, StoredFormat};
 use crate::ext_type_registry;
 use crate::storage::key_encoding::*;
 use crate::storage::LsmStorage;
@@ -58,6 +59,10 @@ pub struct RedisDatabase {
     next_scan_snapshot_id: AtomicU64,
     /// Cached DBSIZE / INFO keyspace counts (no global lock; refreshed on demand).
     db_info_cache: Mutex<HashMap<usize, (i64, i64, Instant)>>,
+    /// Optional zstd value compression settings + counters (strings only).
+    compression: Arc<CompressionSettings>,
+    /// State of the background FORGEKV.COMPRESS / FORGEKV.DECOMPRESS job.
+    pub compress_job: Arc<crate::compress_job::JobState>,
 }
 
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
@@ -94,7 +99,14 @@ impl RedisDatabase {
             scan_snapshots: Mutex::new(HashMap::new()),
             next_scan_snapshot_id: AtomicU64::new(1),
             db_info_cache: Mutex::new(HashMap::new()),
+            compression: Arc::new(CompressionSettings::default()),
+            compress_job: Arc::new(crate::compress_job::JobState::default()),
         }
+    }
+
+    /// Value-compression settings/counters (shared; mutate via the setters).
+    pub fn compression(&self) -> &Arc<CompressionSettings> {
+        &self.compression
     }
 
     // ── Shard lock helpers ────────────────────────────────────────────────────
@@ -248,6 +260,8 @@ impl RedisDatabase {
         nx: bool,
         xx: bool,
     ) -> Result<(), RedisError> {
+        // Compress before taking the shard lock to keep the critical section short.
+        let stored_value = self.compression.encode(value);
         let _guard = self.shard_w(key);
 
         let existing = self.get_meta_inner(db, key);
@@ -296,7 +310,7 @@ impl RedisDatabase {
         let meta_key = encode_meta_key(db, key);
         let sk = encode_string_key(db, key);
         self.storage
-            .put2(meta_key, meta.serialize(), sk, value.to_vec());
+            .put2(meta_key, meta.serialize(), sk, stored_value);
 
         Ok(())
     }
@@ -306,11 +320,15 @@ impl RedisDatabase {
     /// Semantics: plain SET (no NX/XX, no expiry).
     pub fn string_set_batch(&self, db: usize, pairs: &[(&[u8], &[u8])]) -> Result<(), RedisError> {
         let keys: Vec<&[u8]> = pairs.iter().map(|(k, _)| *k).collect();
+        let encoded: Vec<Vec<u8>> = pairs
+            .iter()
+            .map(|(_, v)| self.compression.encode(v))
+            .collect();
         let _guard = self.shard_w_multi(&keys);
 
         // Single pass: clean up conflicts and collect WAL batch entries.
         let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(pairs.len() * 2);
-        for (key, value) in pairs {
+        for ((key, _), stored_value) in pairs.iter().zip(encoded.into_iter()) {
             let existing = self.get_meta_inner(db, key);
             if let Some(ref m) = existing {
                 if m.r#type != RedisType::String {
@@ -330,31 +348,36 @@ impl RedisDatabase {
                 version: old_version + 1,
             };
             batch.push((encode_meta_key(db, key), meta.serialize()));
-            batch.push((encode_string_key(db, key), value.to_vec()));
+            batch.push((encode_string_key(db, key), stored_value));
         }
         self.storage.put_batch(&batch);
         Ok(())
     }
 
     pub fn string_get(&self, db: usize, key: &[u8]) -> Result<Option<Vec<u8>>, RedisError> {
-        let _guard = self.shard_r(key);
+        let stored = {
+            let _guard = self.shard_r(key);
 
-        let meta = match self.get_meta_inner(db, key) {
-            None => return Ok(None),
-            Some(m) => m,
+            let meta = match self.get_meta_inner(db, key) {
+                None => return Ok(None),
+                Some(m) => m,
+            };
+
+            if meta.is_expired_at(now_ms()) {
+                return Ok(None);
+            }
+
+            if meta.r#type != RedisType::String {
+                return Err(RedisError::WrongType);
+            }
+
+            let sk = encode_string_key(db, key);
+            self.storage.get(&sk)
         };
-
-        if meta.is_expired_at(now_ms()) {
-            return Ok(None);
-        }
-
-        if meta.r#type != RedisType::String {
-            return Err(RedisError::WrongType);
-        }
-
-        let sk = encode_string_key(db, key);
-        Ok(self.storage.get(&sk))
+        // Decompress outside the shard lock.
+        Ok(stored.map(|v| self.compression.decode(v)))
     }
+
 
     pub fn string_incr(&self, db: usize, key: &[u8], delta: i64) -> Result<i64, RedisError> {
         let _guard = self.shard_w(key);
@@ -365,7 +388,7 @@ impl RedisDatabase {
                 return Err(RedisError::WrongType);
             }
             let sk = encode_string_key(db, key);
-            match self.storage.get(&sk) {
+            match self.storage.get(&sk).map(|v| self.compression.decode(v)) {
                 None => 0,
                 Some(v) => {
                     let s = std::str::from_utf8(&v).map_err(|_| RedisError::NotInteger)?;
@@ -393,7 +416,8 @@ impl RedisDatabase {
 
         self.save_meta_inner(db, key, &meta);
         let sk = encode_string_key(db, key);
-        self.storage.put(sk, new_val.to_string().into_bytes());
+        self.storage
+            .put(sk, self.compression.encode(new_val.to_string().as_bytes()));
 
         Ok(new_val)
     }
@@ -412,7 +436,10 @@ impl RedisDatabase {
                 return Err(RedisError::WrongType);
             }
             let sk = encode_string_key(db, key);
-            self.storage.get(&sk).unwrap_or_default()
+            self.storage
+                .get(&sk)
+                .map(|v| self.compression.decode(v))
+                .unwrap_or_default()
         } else {
             vec![]
         };
@@ -434,7 +461,7 @@ impl RedisDatabase {
 
         self.save_meta_inner(db, key, &meta);
         let sk = encode_string_key(db, key);
-        self.storage.put(sk, new_val);
+        self.storage.put(sk, self.compression.encode(&new_val));
 
         Ok(new_len)
     }
@@ -1728,7 +1755,7 @@ impl RedisDatabase {
         }
 
         let sk = encode_string_key(db, key);
-        let val = self.storage.get(&sk);
+        let val = self.storage.get(&sk).map(|v| self.compression.decode(v));
         self.delete_key_internal(db, key, Some(&meta));
         Ok(val)
     }
@@ -1751,7 +1778,7 @@ impl RedisDatabase {
         }
 
         let sk = encode_string_key(db, key);
-        let val = self.storage.get(&sk);
+        let val = self.storage.get(&sk).map(|v| self.compression.decode(v));
 
         if let Some(new_exp) = new_expiry_ms {
             self.set_expiry_inner(db, key, &mut meta, new_exp);
@@ -1776,7 +1803,10 @@ impl RedisDatabase {
                 return Err(RedisError::WrongType);
             }
             let sk = encode_string_key(db, key);
-            self.storage.get(&sk).unwrap_or_default()
+            self.storage
+                .get(&sk)
+                .map(|v| self.compression.decode(v))
+                .unwrap_or_default()
         } else {
             vec![]
         };
@@ -1802,7 +1832,7 @@ impl RedisDatabase {
 
         self.save_meta_inner(db, key, &meta);
         let sk = encode_string_key(db, key);
-        self.storage.put(sk, new_val);
+        self.storage.put(sk, self.compression.encode(&new_val));
 
         Ok(result_len)
     }
@@ -1830,7 +1860,7 @@ impl RedisDatabase {
             if let Some(ref m) = existing {
                 if m.r#type == RedisType::String {
                     let sk = encode_string_key(db, key);
-                    self.storage.get(&sk)
+                    self.storage.get(&sk).map(|v| self.compression.decode(v))
                 } else {
                     None
                 }
@@ -1881,7 +1911,7 @@ impl RedisDatabase {
 
         self.save_meta_inner(db, key, &meta);
         let sk = encode_string_key(db, key);
-        self.storage.put(sk, value.to_vec());
+        self.storage.put(sk, self.compression.encode(value));
 
         Ok((true, old_value))
     }
@@ -1922,10 +1952,149 @@ impl RedisDatabase {
             };
             self.save_meta_inner(db, key, &meta);
             let sk = encode_string_key(db, key);
-            self.storage.put(sk, value.to_vec());
+            self.storage.put(sk, self.compression.encode(value));
         }
 
         Ok(1)
+    }
+
+    // ── Value-compression migration helpers ───────────────────────────────────
+
+    /// List `(meta_storage_key, user_key)` of live **string** keys in `db`,
+    /// in storage order, strictly after `after_meta_key` (if given).
+    ///
+    /// Only the (small) metadata entries are materialised, never string values.
+    pub fn list_string_keys_after(
+        &self,
+        db: usize,
+        after_meta_key: Option<&[u8]>,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let db_start = vec![TAG_META, db as u8];
+        let end = vec![TAG_META, (db as u8).wrapping_add(1)];
+        let start: Vec<u8> = match after_meta_key {
+            Some(k) => {
+                let mut s = k.to_vec();
+                s.push(0); // smallest key strictly greater than k
+                s
+            }
+            None => db_start,
+        };
+        let end_opt: Option<&[u8]> = if db as u8 == u8::MAX { None } else { Some(&end) };
+        let now = now_ms();
+        let mut out = Vec::new();
+        for (encoded_key, value) in self.storage.scan(Some(&start), end_opt) {
+            let value = match value {
+                Some(v) => v,
+                None => continue,
+            };
+            if value.len() < METADATA_SIZE_LEGACY || encoded_key.len() < 4 {
+                continue;
+            }
+            if encoded_key[0] != TAG_META || encoded_key[1] as usize != db {
+                continue;
+            }
+            let meta = RedisMetadata::deserialize(&value);
+            if meta.r#type != RedisType::String || meta.is_expired_at(now) {
+                continue;
+            }
+            let key_len = u16::from_be_bytes(encoded_key[2..4].try_into().unwrap()) as usize;
+            if encoded_key.len() < 4 + key_len {
+                continue;
+            }
+            let user_key = encoded_key[4..4 + key_len].to_vec();
+            out.push((encoded_key, user_key));
+        }
+        out
+    }
+
+    /// Re-encode one string key in place (`Compress` / `Decompress`) or, with
+    /// `dry_run`, only compute what would happen.
+    ///
+    /// The per-key shard write lock is held while the current stored bytes are
+    /// re-read and rewritten, so a concurrent client write to the same key is
+    /// either fully before (we then convert the newer value) or fully after
+    /// (it overwrites ours). The metadata (TTL, version) is NOT touched: the
+    /// logical value does not change.
+    pub fn migrate_string_key(
+        &self,
+        db: usize,
+        key: &[u8],
+        direction: crate::compress_job::Direction,
+        dry_run: bool,
+    ) -> crate::compress_job::KeyOutcome {
+        use crate::compress_job::{Direction, KeyOutcome};
+        let sk = encode_string_key(db, key);
+
+        // Dry runs only need a read lock; real rewrites need the write lock.
+        let _w;
+        let _r;
+        if dry_run {
+            _r = Some(self.shard_r(key));
+            _w = None;
+        } else {
+            _w = Some(self.shard_w(key));
+            _r = None;
+        }
+
+        match self.get_live_meta_inner(db, key) {
+            Some(m) if m.r#type == RedisType::String => {}
+            _ => return KeyOutcome::Gone,
+        }
+        let stored = match self.storage.get(&sk) {
+            Some(v) => v,
+            None => return KeyOutcome::Gone,
+        };
+        let stored_len = stored.len() as u64;
+        let fmt = compression::classify(&stored);
+
+        match direction {
+            Direction::Compress => {
+                if fmt == StoredFormat::Zstd {
+                    return KeyOutcome::AlreadyTarget { stored_len };
+                }
+                if fmt == StoredFormat::EscapedRaw {
+                    // Magic-prefixed raw value; leave as is.
+                    return KeyOutcome::Unchanged { stored_len };
+                }
+                let min = self.compression.min_size();
+                if stored.len() < min {
+                    return KeyOutcome::Unchanged { stored_len };
+                }
+                // `stored` is plain raw here (classify == Raw), i.e. already the logical value.
+                match compression::try_compress(&stored, self.compression.level()) {
+                    None => KeyOutcome::Unchanged { stored_len },
+                    Some(c) => {
+                        let new_len = c.len() as u64;
+                        if !dry_run {
+                            self.storage.put(sk, c);
+                        }
+                        KeyOutcome::Converted {
+                            before: stored_len,
+                            after: new_len,
+                        }
+                    }
+                }
+            }
+            Direction::Decompress => {
+                if fmt != StoredFormat::Zstd {
+                    return KeyOutcome::AlreadyTarget { stored_len };
+                }
+                let (logical, info) = compression::decode_stored(stored);
+                if info != compression::DecodeInfo::Decompressed {
+                    // Not a valid frame: leave untouched.
+                    return KeyOutcome::Error;
+                }
+                let raw = compression::encode_raw(&logical);
+                let new_len = raw.len() as u64;
+                if !dry_run {
+                    self.storage.put(sk, raw);
+                }
+                KeyOutcome::Converted {
+                    before: stored_len,
+                    after: new_len,
+                }
+            }
+        }
     }
 
     // ── Hash extended commands ────────────────────────────────────────────────
@@ -4243,7 +4412,8 @@ pub fn increment_last_byte(buf: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod lock_contention_tests {
-    use super::{now_ms, RedisDatabase};
+    use super::{now_ms, RedisDatabase, RedisError};
+    use crate::storage::key_encoding::encode_string_key;
     use crate::config::ServerConfig;
     use crate::storage::LsmStorage;
     use std::fs;
@@ -4392,6 +4562,397 @@ mod lock_contention_tests {
         let (keys2, _) = db.db_info(0).unwrap();
         assert_eq!(keys, keys2);
         assert_eq!(db.count_exclusive_shard_locks(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── value compression ────────────────────────────────────────────────────
+
+    use crate::compress_job::{self, Direction, JobConfig, RunState};
+    use crate::compression::{classify, CompressionMode, StoredFormat};
+
+    fn json_like(tag: &str, n: usize) -> Vec<u8> {
+        let mut s = String::from("[");
+        let mut i = 0;
+        while s.len() < n {
+            s.push_str(&format!(
+                "{{\"id\":{i},\"tag\":\"{tag}\",\"name\":\"Example Hotel {i}\",\"price\":{}.5}},",
+                100 + i % 40
+            ));
+            i += 1;
+        }
+        s.push(']');
+        s.into_bytes()
+    }
+
+    fn stored_bytes(db: &RedisDatabase, key: &[u8]) -> Vec<u8> {
+        db.storage.get(&encode_string_key(0, key)).expect("stored")
+    }
+
+    fn enable(db: &RedisDatabase) {
+        db.compression().set_mode(CompressionMode::Zstd);
+    }
+
+    fn wait_job(db: &Arc<RedisDatabase>) {
+        let started = Instant::now();
+        while db.compress_job.run_state() == RunState::Running {
+            assert!(started.elapsed() < Duration::from_secs(60), "job timeout");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn job_cfg(direction: Direction, dry_run: bool) -> JobConfig {
+        JobConfig {
+            direction,
+            dry_run,
+            rate: 0,
+            db: Some(0),
+            limit: 0,
+        }
+    }
+
+    #[test]
+    fn compression_off_by_default_stores_values_verbatim() {
+        let (dir, db) = test_db("cmp-off");
+        let v = json_like("a", 5000);
+        db.string_set(0, b"k", &v, 0, false, false).unwrap();
+        assert_eq!(stored_bytes(&db, b"k"), v);
+        assert_eq!(db.string_get(0, b"k").unwrap().unwrap(), v);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_get_roundtrip_compressed_and_flag_off_still_reads() {
+        let (dir, db) = test_db("cmp-rt");
+        enable(&db);
+        let v = json_like("a", 50_000);
+        db.string_set(0, b"k", &v, 0, false, false).unwrap();
+        let st = stored_bytes(&db, b"k");
+        assert_eq!(classify(&st), StoredFormat::Zstd);
+        assert!(st.len() < v.len() / 3);
+        assert_eq!(db.string_get(0, b"k").unwrap().unwrap(), v);
+        // rollback of the flag: still readable
+        db.compression().set_mode(CompressionMode::Off);
+        assert_eq!(db.string_get(0, b"k").unwrap().unwrap(), v);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_raw_value_in_storage_is_readable_with_compression_on() {
+        let (dir, db) = test_db("cmp-legacy");
+        // Written by compression-off (== legacy format), including small and empty values.
+        db.string_set(0, b"big", &json_like("l", 4000), 0, false, false).unwrap();
+        db.string_set(0, b"small", b"hi", 0, false, false).unwrap();
+        db.string_set(0, b"empty", b"", 0, false, false).unwrap();
+        enable(&db);
+        assert_eq!(db.string_get(0, b"big").unwrap().unwrap(), json_like("l", 4000));
+        assert_eq!(db.string_get(0, b"small").unwrap().unwrap(), b"hi");
+        assert_eq!(db.string_get(0, b"empty").unwrap().unwrap(), b"");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn magic_prefixed_values_roundtrip_through_set() {
+        let (dir, db) = test_db("cmp-magic");
+        for mode in [CompressionMode::Off, CompressionMode::Zstd] {
+            db.compression().set_mode(mode);
+            let v = vec![0xFF, b'Z', b'K', 0x02, 1, 0, 0, 0, 9];
+            db.string_set(0, b"m", &v, 0, false, false).unwrap();
+            assert_eq!(classify(&stored_bytes(&db, b"m")), StoredFormat::EscapedRaw);
+            assert_eq!(db.string_get(0, b"m").unwrap().unwrap(), v);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_string_paths_work_with_compression_on() {
+        let (dir, db) = test_db("cmp-paths");
+        enable(&db);
+        let big = json_like("p", 20_000);
+
+        // SET / STRLEN (logical length)
+        db.string_set(0, b"a", &big, 0, false, false).unwrap();
+        assert_eq!(classify(&stored_bytes(&db, b"a")), StoredFormat::Zstd);
+        assert_eq!(db.string_get(0, b"a").unwrap().unwrap().len(), big.len());
+
+        // MSET (batch)
+        let b2 = json_like("q", 9_000);
+        db.string_set_batch(0, &[(&b"m1"[..], &big[..]), (&b"m2"[..], &b2[..]), (&b"m3"[..], &b"tiny"[..])])
+            .unwrap();
+        assert_eq!(classify(&stored_bytes(&db, b"m1")), StoredFormat::Zstd);
+        assert_eq!(classify(&stored_bytes(&db, b"m3")), StoredFormat::Raw);
+        assert_eq!(db.string_get(0, b"m1").unwrap().unwrap(), big);
+        assert_eq!(db.string_get(0, b"m2").unwrap().unwrap(), b2);
+        assert_eq!(db.string_get(0, b"m3").unwrap().unwrap(), b"tiny");
+
+        // APPEND operates on decoded bytes and returns the logical length
+        let n = db.string_append(0, b"a", b"-tail").unwrap();
+        assert_eq!(n as usize, big.len() + 5);
+        let mut expect = big.clone();
+        expect.extend_from_slice(b"-tail");
+        assert_eq!(db.string_get(0, b"a").unwrap().unwrap(), expect);
+        assert_eq!(classify(&stored_bytes(&db, b"a")), StoredFormat::Zstd);
+
+        // SETRANGE
+        let n = db.string_setrange(0, b"a", 3, b"XYZ").unwrap();
+        assert_eq!(n as usize, expect.len());
+        expect[3..6].copy_from_slice(b"XYZ");
+        assert_eq!(db.string_get(0, b"a").unwrap().unwrap(), expect);
+        // SETRANGE past the end zero-pads
+        let n = db.string_setrange(0, b"a", expect.len() + 2, b"!").unwrap();
+        assert_eq!(n as usize, expect.len() + 3);
+
+        // INCR on a (compressed) padded number
+        let mut num = vec![b' '; 3000];
+        num.extend_from_slice(b"41");
+        db.string_set(0, b"n", &num, 0, false, false).unwrap();
+        assert_eq!(classify(&stored_bytes(&db, b"n")), StoredFormat::Zstd);
+        assert_eq!(db.string_incr(0, b"n", 1).unwrap(), 42);
+        assert_eq!(db.string_get(0, b"n").unwrap().unwrap(), b"42");
+        assert!(matches!(
+            db.string_incr(0, b"m1", 1),
+            Err(RedisError::NotInteger)
+        ));
+
+        // SET ... GET returns the old decoded value
+        let (ok, old) = db
+            .string_set_get_old(0, b"m2", b"new", 0, false, false, false)
+            .unwrap();
+        assert!(ok);
+        assert_eq!(old.unwrap(), b2);
+        assert_eq!(db.string_get(0, b"m2").unwrap().unwrap(), b"new");
+
+        // GETEX keeps value, sets TTL
+        let far = now_ms() + 3_600_000;
+        assert_eq!(db.string_getex(0, b"m1", Some(far)).unwrap().unwrap(), big);
+        assert_eq!(db.string_get_expiry_ms(0, b"m1").unwrap(), far);
+        assert_eq!(db.string_get(0, b"m1").unwrap().unwrap(), big);
+
+        // GETDEL
+        assert_eq!(db.string_getdel(0, b"m1").unwrap().unwrap(), big);
+        assert!(db.string_get(0, b"m1").unwrap().is_none());
+
+        // MSETNX
+        assert_eq!(db.msetnx(0, &[(&b"x1"[..], &big[..]), (&b"x2"[..], &b"s"[..])]).unwrap(), 1);
+        assert_eq!(classify(&stored_bytes(&db, b"x1")), StoredFormat::Zstd);
+        assert_eq!(db.string_get(0, b"x1").unwrap().unwrap(), big);
+        assert_eq!(db.msetnx(0, &[(&b"x1"[..], &b"no"[..])]).unwrap(), 0);
+
+        // NX / XX conditions unaffected
+        assert!(db.string_set(0, b"x1", b"v", 0, true, false).is_err());
+
+        // RENAME / COPY move stored bytes verbatim and stay readable
+        db.rename_key(0, b"x1", b"x1r").unwrap();
+        assert_eq!(db.string_get(0, b"x1r").unwrap().unwrap(), big);
+        assert!(db.string_get(0, b"x1").unwrap().is_none());
+
+        // Overwriting a compressed value with a tiny one stores it raw
+        db.string_set(0, b"x1r", b"tiny", 0, false, false).unwrap();
+        assert_eq!(stored_bytes(&db, b"x1r"), b"tiny");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_compress_dryrun_compress_and_decompress() {
+        let (dir, db) = test_db("cmp-migrate");
+        let mut expect: Vec<(String, Vec<u8>)> = Vec::new();
+        // Raw (legacy-format) data: compressible, small, incompressible, magic-prefixed, with TTL.
+        for i in 0..40 {
+            let k = format!("big{i}");
+            let v = json_like(&k, 3000 + i * 10);
+            db.string_set(0, k.as_bytes(), &v, 0, false, false).unwrap();
+            expect.push((k, v));
+        }
+        db.string_set(0, b"small", b"tiny", 0, false, false).unwrap();
+        expect.push(("small".into(), b"tiny".to_vec()));
+        let mut noise = Vec::new();
+        let mut x = 12345u64;
+        for _ in 0..4000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            noise.push((x >> 33) as u8);
+        }
+        db.string_set(0, b"noise", &noise, 0, false, false).unwrap();
+        expect.push(("noise".into(), noise));
+        let magic = vec![0xFF, b'Z', b'K', 1, 2, 3];
+        db.string_set(0, b"magic", &magic, 0, false, false).unwrap();
+        expect.push(("magic".into(), magic));
+        let ttl_at = now_ms() + 3_600_000;
+        let vttl = json_like("ttl", 4000);
+        db.string_set(0, b"withttl", &vttl, ttl_at, false, false).unwrap();
+        expect.push(("withttl".into(), vttl));
+        // a non-string key must be ignored
+        db.hset(0, b"h", &[(&b"f"[..], &b"v"[..])]).unwrap();
+        // key in db 1 untouched by a DB 0 job
+        db.string_set(1, b"other", &json_like("o", 3000), 0, false, false).unwrap();
+
+        // Compress job refuses to be meaningful without the flag; dry-run works anyway.
+        compress_job::start(&db, job_cfg(Direction::Compress, true), false).unwrap();
+        wait_job(&db);
+        assert_eq!(db.compress_job.run_state(), RunState::Completed);
+        let c = |a: &std::sync::atomic::AtomicU64| a.load(AtomicOrdering::Relaxed);
+        let before = c(&db.compress_job.bytes_before);
+        let after = c(&db.compress_job.bytes_after);
+        assert!(after < before / 2, "projected savings expected: {before} -> {after}");
+        assert_eq!(c(&db.compress_job.converted), 40 + 1); // 40 big + withttl
+        assert_eq!(c(&db.compress_job.examined), 44); // + small, noise, magic
+        // dry run wrote nothing
+        for (k, v) in &expect {
+            if k != "magic" {
+                assert_eq!(stored_bytes(&db, k.as_bytes()), *v, "dry-run must not write {k}");
+            }
+        }
+
+        // Real compress job
+        enable(&db);
+        compress_job::start(&db, job_cfg(Direction::Compress, false), false).unwrap();
+        wait_job(&db);
+        assert_eq!(c(&db.compress_job.errors), 0);
+        for (k, v) in &expect {
+            assert_eq!(db.string_get(0, k.as_bytes()).unwrap().unwrap(), *v, "{k}");
+        }
+        assert_eq!(classify(&stored_bytes(&db, b"big0")), StoredFormat::Zstd);
+        assert_eq!(classify(&stored_bytes(&db, b"withttl")), StoredFormat::Zstd);
+        assert_eq!(stored_bytes(&db, b"small"), b"tiny");
+        assert_eq!(classify(&stored_bytes(&db, b"noise")), StoredFormat::Raw);
+        assert_eq!(classify(&stored_bytes(&db, b"magic")), StoredFormat::EscapedRaw);
+        assert_eq!(db.string_get_expiry_ms(0, b"withttl").unwrap(), ttl_at);
+        assert_eq!(
+            db.string_get(1, b"other").unwrap().unwrap(),
+            json_like("o", 3000)
+        );
+        assert_eq!(
+            db.storage.get(&encode_string_key(1, b"other")).unwrap(),
+            json_like("o", 3000),
+            "db 1 must be untouched"
+        );
+        assert_eq!(c(&db.compress_job.converted), 41);
+
+        // Idempotent second run: everything already in target format / unchanged.
+        compress_job::start(&db, job_cfg(Direction::Compress, false), false).unwrap();
+        wait_job(&db);
+        assert_eq!(c(&db.compress_job.converted), 0);
+        assert_eq!(c(&db.compress_job.already_target), 41);
+        assert_eq!(c(&db.compress_job.seen_compressed), 41);
+
+        // Decompress (rollback) with the flag OFF.
+        db.compression().set_mode(CompressionMode::Off);
+        compress_job::start(&db, job_cfg(Direction::Decompress, false), false).unwrap();
+        wait_job(&db);
+        assert_eq!(c(&db.compress_job.converted), 41);
+        for (k, v) in &expect {
+            assert_eq!(db.string_get(0, k.as_bytes()).unwrap().unwrap(), *v);
+            if k != "magic" {
+                assert_eq!(stored_bytes(&db, k.as_bytes()), *v, "raw after decompress: {k}");
+            }
+        }
+        assert_eq!(db.string_get_expiry_ms(0, b"withttl").unwrap(), ttl_at);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_limit_and_resume_cover_every_key_once() {
+        let (dir, db) = test_db("cmp-resume");
+        for i in 0..25 {
+            let k = format!("r{i:02}");
+            db.string_set(0, k.as_bytes(), &json_like(&k, 2000), 0, false, false).unwrap();
+        }
+        enable(&db);
+        let mut cfg = job_cfg(Direction::Compress, false);
+        cfg.limit = 10;
+        compress_job::start(&db, cfg.clone(), false).unwrap();
+        wait_job(&db);
+        assert_eq!(db.compress_job.run_state(), RunState::Stopped);
+        assert_eq!(db.compress_job.examined.load(AtomicOrdering::Relaxed), 10);
+        // Resume (limit again) twice more
+        compress_job::start(&db, cfg.clone(), true).unwrap();
+        wait_job(&db);
+        assert_eq!(db.compress_job.examined.load(AtomicOrdering::Relaxed), 20);
+        cfg.limit = 0;
+        compress_job::start(&db, cfg, true).unwrap();
+        wait_job(&db);
+        assert_eq!(db.compress_job.run_state(), RunState::Completed);
+        assert_eq!(db.compress_job.examined.load(AtomicOrdering::Relaxed), 25);
+        assert_eq!(db.compress_job.converted.load(AtomicOrdering::Relaxed), 25);
+        // Resume with a different direction is rejected
+        assert!(compress_job::start(&db, job_cfg(Direction::Decompress, false), true).is_err());
+        for i in 0..25 {
+            let k = format!("r{i:02}");
+            assert_eq!(classify(&stored_bytes(&db, k.as_bytes())), StoredFormat::Zstd);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_client_writes_win_over_migration() {
+        let (dir, db) = test_db("cmp-concurrent");
+        const KEYS: usize = 300;
+        for i in 0..KEYS {
+            let k = format!("c{i}");
+            db.string_set(0, k.as_bytes(), &json_like("v0", 2500), 0, false, false).unwrap();
+        }
+        enable(&db);
+        // Writer thread: repeatedly overwrite every key with a new generation; the
+        // last generation per key is the truth. Runs while the migration runs.
+        let stop = Arc::new(AtomicBool::new(false));
+        let db_w = db.clone();
+        let stop_w = stop.clone();
+        let writer = thread::spawn(move || {
+            let mut generation = 1u32;
+            while !stop_w.load(AtomicOrdering::Relaxed) || generation < 3 {
+                for i in 0..KEYS {
+                    let k = format!("c{i}");
+                    let v = json_like(&format!("gen{generation}-{i}"), 2000 + (i % 7) * 100);
+                    db_w.string_set(0, k.as_bytes(), &v, 0, false, false).unwrap();
+                }
+                generation += 1;
+            }
+            generation - 1
+        });
+        for _ in 0..3 {
+            compress_job::start(&db, job_cfg(Direction::Compress, false), false).unwrap();
+            wait_job(&db);
+            assert_eq!(db.compress_job.errors.load(AtomicOrdering::Relaxed), 0);
+            compress_job::start(&db, job_cfg(Direction::Decompress, false), false).unwrap();
+            wait_job(&db);
+        }
+        stop.store(true, AtomicOrdering::Relaxed);
+        let last_gen = writer.join().unwrap();
+        // One more migration pass after the writer is done, then verify the truth.
+        compress_job::start(&db, job_cfg(Direction::Compress, false), false).unwrap();
+        wait_job(&db);
+        for i in 0..KEYS {
+            let k = format!("c{i}");
+            let want = json_like(&format!("gen{last_gen}-{i}"), 2000 + (i % 7) * 100);
+            assert_eq!(
+                db.string_get(0, k.as_bytes()).unwrap().unwrap(),
+                want,
+                "migration clobbered a newer client write for {k}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn job_single_flight_stop_and_reset() {
+        let (dir, db) = test_db("cmp-job-ctl");
+        for i in 0..200 {
+            let k = format!("s{i}");
+            db.string_set(0, k.as_bytes(), &json_like(&k, 1500), 0, false, false).unwrap();
+        }
+        enable(&db);
+        let mut cfg = job_cfg(Direction::Compress, false);
+        cfg.rate = 100; // slow: ~2s for 200 keys
+        compress_job::start(&db, cfg.clone(), false).unwrap();
+        assert!(compress_job::start(&db, cfg.clone(), false).is_err(), "single flight");
+        assert!(!db.compress_job.reset(), "cannot reset while running");
+        thread::sleep(Duration::from_millis(200));
+        assert!(db.compress_job.request_stop());
+        wait_job(&db);
+        assert_eq!(db.compress_job.run_state(), RunState::Stopped);
+        let done = db.compress_job.examined.load(AtomicOrdering::Relaxed);
+        assert!(done > 0 && done < 200, "stopped partway: {done}");
+        assert!(db.compress_job.reset());
+        assert_eq!(db.compress_job.run_state(), RunState::Idle);
+        assert!(compress_job::start(&db, cfg, true).is_err(), "nothing to resume after reset");
         let _ = fs::remove_dir_all(&dir);
     }
 }

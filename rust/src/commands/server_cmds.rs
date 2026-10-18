@@ -329,6 +329,54 @@ impl CommandHandler for InfoCommand {
             ));
         }
 
+        // Compression section (string value compression)
+        if include_all || section == "compression" {
+            let c = self.db.compression();
+            let ld = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
+            let bin = ld(&c.write_bytes_in);
+            let bstored = ld(&c.write_bytes_stored);
+            let write_ratio = if bstored > 0 {
+                format!("{:.3}", bin as f64 / bstored as f64)
+            } else {
+                "0".to_string()
+            };
+            output.push_str(&format!(
+                "# Compression\r\n\
+                value_compression:{mode}\r\n\
+                value_compression_level:{level}\r\n\
+                value_compression_min_size:{min}\r\n\
+                compression_writes_compressed:{wc}\r\n\
+                compression_writes_raw:{wr}\r\n\
+                compression_writes_below_min_size:{wb}\r\n\
+                compression_writes_incompressible:{wi}\r\n\
+                compression_writes_escaped:{we}\r\n\
+                compression_write_bytes_in:{bin}\r\n\
+                compression_write_bytes_stored:{bstored}\r\n\
+                compression_write_ratio:{wratio}\r\n\
+                compression_reads_decompressed:{rd}\r\n\
+                compression_decode_fallbacks:{df}\r\n",
+                mode = c.mode().as_str(),
+                level = c.level(),
+                min = c.min_size(),
+                wc = ld(&c.writes_compressed),
+                wr = ld(&c.writes_raw),
+                wb = ld(&c.writes_below_min),
+                wi = ld(&c.writes_incompressible),
+                we = ld(&c.writes_escaped),
+                bin = bin,
+                bstored = bstored,
+                wratio = write_ratio,
+                rd = ld(&c.reads_decompressed),
+                df = ld(&c.decode_fallbacks),
+            ));
+            for (k, v) in self.db.compress_job.status_pairs() {
+                if k == "cursor_key" {
+                    continue;
+                }
+                output.push_str(&format!("compression_job_{}:{}\r\n", k, v));
+            }
+        }
+
         // Clients section
         if include_all || section == "clients" {
             output.push_str(&format!(
@@ -1027,6 +1075,7 @@ impl CommandHandler for EchoCommand {
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 pub struct ConfigCommand {
+    pub db: Arc<RedisDatabase>,
     pub config: Arc<parking_lot::RwLock<ServerConfig>>,
 }
 
@@ -1045,12 +1094,48 @@ impl CommandHandler for ConfigCommand {
                 if args.len() < 4 || (args.len() - 2) % 2 != 0 {
                     return RespValue::error("ERR wrong number of arguments for 'config|set' command");
                 }
+                // Validate value-compression* settings first so a bad value
+                // rejects the whole CONFIG SET (never silently flips the mode).
+                {
+                    let mut j = 2;
+                    while j + 1 < args.len() {
+                        let key = args[j].as_str().unwrap_or("").to_lowercase();
+                        let val = args[j + 1].as_str().unwrap_or("");
+                        let ok = match key.as_str() {
+                            "value-compression" => {
+                                crate::compression::CompressionMode::parse(val).is_some()
+                            }
+                            "value-compression-level" => {
+                                crate::compression::parse_level(val).is_some()
+                            }
+                            _ => true,
+                        };
+                        if !ok {
+                            return RespValue::error(&format!(
+                                "ERR Invalid argument '{}' for CONFIG SET '{}'",
+                                val, key
+                            ));
+                        }
+                        j += 2;
+                    }
+                }
                 let mut cfg = self.config.write();
                 let mut i = 2;
                 while i + 1 < args.len() {
                     let key = args[i].as_str().unwrap_or("").to_lowercase();
                     let val = args[i + 1].as_str().unwrap_or("");
                     apply_config_set(&mut cfg, &key, val);
+                    // Push value-compression* changes to the live database settings.
+                    let c = self.db.compression();
+                    match key.as_str() {
+                        "value-compression" | "value-compression-level"
+                        | "value-compression-min-size" => {
+                            c.set_mode(cfg.value_compression);
+                            c.set_level(cfg.value_compression_level);
+                            c.set_min_size(cfg.value_compression_min_size as usize);
+                        }
+                        _ => {}
+                    }
                     i += 2;
                 }
                 RespValue::ok()
@@ -1138,6 +1223,17 @@ fn apply_config_set(cfg: &mut ServerConfig, key: &str, val: &str) {
         "latency-tracking" => cfg.latency_tracking = val == "yes",
         "latency-monitor-threshold" => cfg.latency_monitor_threshold = val.parse().unwrap_or(0),
         "tracking-table-max-keys" => cfg.tracking_table_max_keys = val.parse().unwrap_or(0),
+        "value-compression" => {
+            if let Some(m) = crate::compression::CompressionMode::parse(val) {
+                cfg.value_compression = m;
+            }
+        }
+        "value-compression-level" => {
+            if let Some(l) = crate::compression::parse_level(val) {
+                cfg.value_compression_level = l;
+            }
+        }
+        "value-compression-min-size" => cfg.value_compression_min_size = parse_memory_size(val),
         "stream-node-max-bytes" => cfg.stream_node_max_bytes = val.parse().unwrap_or(4096),
         "stream-node-max-entries" => cfg.stream_node_max_entries = val.parse().unwrap_or(100),
         "tcp-keepalive" => cfg.tcp_keepalive = val.parse().unwrap_or(300),
@@ -1471,6 +1567,18 @@ fn get_config_pairs(cfg: &ServerConfig, pattern: &str) -> Vec<(String, String)> 
         (
             "memtable-size-mb".to_string(),
             cfg.memtable_size_mb.to_string(),
+        ),
+        (
+            "value-compression".to_string(),
+            cfg.value_compression.as_str().to_string(),
+        ),
+        (
+            "value-compression-level".to_string(),
+            cfg.value_compression_level.to_string(),
+        ),
+        (
+            "value-compression-min-size".to_string(),
+            cfg.value_compression_min_size.to_string(),
         ),
         (
             "enable-debug-command".to_string(),
@@ -2038,6 +2146,108 @@ impl CommandHandler for CompactCommand {
             RespValue::bulk_str("compacting"),
             RespValue::integer(if s.compacting { 1 } else { 0 }),
         ]))
+    }
+}
+
+// ─── FORGEKV.COMPRESS / FORGEKV.DECOMPRESS (value-compression migration) ─────
+
+pub struct CompressMigrationCommand {
+    pub db: Arc<RedisDatabase>,
+    pub direction: crate::compress_job::Direction,
+}
+
+impl CommandHandler for CompressMigrationCommand {
+    fn name(&self) -> &str {
+        match self.direction {
+            crate::compress_job::Direction::Compress => "FORGEKV.COMPRESS",
+            crate::compress_job::Direction::Decompress => "FORGEKV.DECOMPRESS",
+        }
+    }
+    fn execute(&self, _db_index: &mut usize, args: &[RespValue]) -> RespValue {
+        use crate::compress_job::{self, Direction, JobConfig};
+        let job = self.db.compress_job.clone();
+        let mut dry_run = false;
+        let mut resume = false;
+        let mut rate: u64 = 500;
+        let mut db_opt: Option<usize> = None;
+        let mut limit: u64 = 0;
+
+        let mut i = 1;
+        while i < args.len() {
+            let tok = args[i].as_str().unwrap_or("").to_uppercase();
+            let num = |i: &mut usize| -> Option<u64> {
+                *i += 1;
+                args.get(*i)?.as_str()?.parse::<u64>().ok()
+            };
+            match tok.as_str() {
+                "STATUS" => {
+                    let mut out = Vec::new();
+                    for (k, v) in job.status_pairs() {
+                        out.push(RespValue::bulk_str(&k));
+                        out.push(RespValue::bulk_str(&v));
+                    }
+                    return RespValue::Array(Some(out));
+                }
+                "STOP" => {
+                    return if job.request_stop() {
+                        RespValue::simple("Stop requested; the job keeps its cursor, use RESUME to continue")
+                    } else {
+                        RespValue::error("ERR no job is running")
+                    };
+                }
+                "RESET" => {
+                    return if job.reset() {
+                        RespValue::ok()
+                    } else {
+                        RespValue::error("ERR a job is running; STOP it first")
+                    };
+                }
+                "DRYRUN" => dry_run = true,
+                "RESUME" => resume = true,
+                "RATE" => match num(&mut i) {
+                    Some(n) => rate = n,
+                    None => return RespValue::error("ERR RATE needs a non-negative integer (keys/sec, 0 = unlimited)"),
+                },
+                "LIMIT" => match num(&mut i) {
+                    Some(n) => limit = n,
+                    None => return RespValue::error("ERR LIMIT needs a non-negative integer"),
+                },
+                "DB" => match num(&mut i) {
+                    Some(n) => db_opt = Some(n as usize),
+                    None => return RespValue::error("ERR DB needs a database index"),
+                },
+                _ => return RespValue::error(&format!(
+                    "ERR syntax error. Usage: {} [DRYRUN] [RATE keys/sec] [DB n] [LIMIT n] [RESUME] | STATUS | STOP | RESET",
+                    self.name()
+                )),
+            }
+            i += 1;
+        }
+
+        if self.direction == Direction::Compress
+            && !dry_run
+            && self.db.compression().mode() == crate::compression::CompressionMode::Off
+        {
+            return RespValue::error(
+                "ERR value-compression is off; CONFIG SET value-compression zstd first (or use DRYRUN)",
+            );
+        }
+
+        let cfg = JobConfig {
+            direction: self.direction,
+            dry_run,
+            rate,
+            db: db_opt,
+            limit,
+        };
+        match compress_job::start(&self.db, cfg, resume) {
+            Ok(()) => RespValue::simple(if dry_run {
+                "Background dry run started; poll with STATUS"
+            } else {
+                "Background job started; poll with STATUS"
+            }),
+            Err(e) => RespValue::error(&e),
+        }
     }
 }
 

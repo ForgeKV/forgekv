@@ -192,6 +192,15 @@ dir /data
 databases 16
 ```
 
+### Optional value compression (zstd)
+
+String values can be transparently compressed with zstd (`value-compression zstd`,
+level 1-19, min size, >=10 % saving required). It is **off by default**, reads always
+decode both formats, and existing data can be converted in place with the throttled,
+resumable `FORGEKV.COMPRESS` job (with `DRYRUN`) and rolled back with `FORGEKV.DECOMPRESS`.
+Binaries older than 0.3.0 cannot read compressed values - see
+[docs/value-compression.md](docs/value-compression.md) for the format, the rollout order and the risks.
+
 ### Build from source
 
 ```bash
