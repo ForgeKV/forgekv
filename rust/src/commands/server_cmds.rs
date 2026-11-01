@@ -522,18 +522,21 @@ impl CommandHandler for InfoCommand {
                 mt = lsm.memtable_shard_bytes,
             ));
             // SST reader-cache health: deleted-but-mapped files hold disk space until unmapped.
-            let (del_files, del_bytes) = self.db.lsm_deleted_sst_mappings();
+            // The /proc/self/maps scan is cached for up to 10 s (age reported below).
+            let (del_files, del_bytes, del_age_ms) = self.db.lsm_deleted_sst_mappings();
             output.push_str(&format!(
                 "lsm_sst_open_readers:{}\r\n\
                 lsm_sst_obsolete_readers:{}\r\n\
                 lsm_sst_deleted_mapped_files:{}\r\n\
                 lsm_sst_deleted_mapped_bytes:{}\r\n\
+                lsm_sst_deleted_mapped_age_ms:{}\r\n\
                 lsm_sst_uncached_opens:{}\r\n\
                 lsm_sst_obsolete_evicted:{}\r\n",
                 lsm.sst_open_readers,
                 lsm.sst_obsolete_readers,
                 del_files,
                 del_bytes,
+                del_age_ms,
                 lsm.sst_uncached_opens,
                 lsm.sst_obsolete_evicted,
             ));

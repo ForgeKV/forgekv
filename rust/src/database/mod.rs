@@ -923,7 +923,7 @@ impl RedisDatabase {
     }
 
     /// Unlinked SST files still mmapped by this process: (files, bytes).
-    pub fn lsm_deleted_sst_mappings(&self) -> (usize, u64) {
+    pub fn lsm_deleted_sst_mappings(&self) -> (usize, u64, u64) {
         self.storage.deleted_sst_mappings()
     }
 

@@ -330,7 +330,7 @@ impl Compaction {
             }
         }
         self.purge_pending(&mut pending, true);
-        self.evict_obsolete_readers();
+        self.auto_sweep();
         end_state
     }
 
@@ -450,10 +450,16 @@ impl Compaction {
         }
 
         if kept.is_empty() {
-            if !self.manifest.replace_in_place(level, file, None) {
-                return Ok(StepOutcome::Skipped);
+            // Swap + save as one step: on a failed save the in-memory removal is rolled back
+            // and the file is NOT queued for unlink (the caller only purges on Ok).
+            match self.manifest.replace_in_place_and_save(level, file, None) {
+                Ok(true) => {}
+                Ok(false) => return Ok(StepOutcome::Skipped),
+                Err(e) => {
+                    eprintln!("ERROR compact-full: manifest save failed, keeping {file}: {e}");
+                    return Err(format!("manifest save: {e}"));
+                }
             }
-            self.manifest.save().map_err(|e| format!("manifest save: {e}"))?;
             return Ok(StepOutcome::Deleted { bytes_read: input_len, reclaimed: input_len });
         }
 
@@ -481,15 +487,18 @@ impl Compaction {
             return Err("verification of the rewritten file failed; original kept".into());
         }
         let out_len = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-        if !self.manifest.replace_in_place(level, file, Some(new_name.clone())) {
-            cleanup(&final_path);
-            return Ok(StepOutcome::Skipped);
-        }
-        if let Err(e) = self.manifest.save() {
-            // Roll back the in-memory swap so memory and disk agree.
-            self.manifest.replace_in_place(level, &new_name, Some(file.to_string()));
-            cleanup(&final_path);
-            return Err(format!("manifest save: {e}"));
+        match self.manifest.replace_in_place_and_save(level, file, Some(new_name.clone())) {
+            Ok(true) => {}
+            Ok(false) => {
+                cleanup(&final_path);
+                return Ok(StepOutcome::Skipped);
+            }
+            Err(e) => {
+                // Swap already rolled back in memory; drop the unpublished output, keep input.
+                eprintln!("ERROR compact-full: manifest save failed, keeping {file}: {e}");
+                cleanup(&final_path);
+                return Err(format!("manifest save: {e}"));
+            }
         }
         Ok(StepOutcome::Rewritten {
             bytes_read: input_len,
@@ -618,6 +627,44 @@ mod tests {
         assert_eq!(f.get("k45").unwrap(), big("old").into_bytes());
         assert_eq!(f.get("k99"), None);
         // inputs removed after grace; manifest and disk agree
+        let in_manifest: usize = f.manifest.snapshot().iter().map(|l| l.len()).sum();
+        assert_eq!(in_manifest, f.sst_files_on_disk());
+    }
+
+    /// A failing MANIFEST save must not unlink (or evict) the input: the swap is rolled back
+    /// in memory, the unpublished output is deleted, reads are unchanged, and a later run
+    /// with a working disk completes normally.
+    #[test]
+    fn failed_manifest_save_keeps_inputs_and_rolls_back() {
+        let f = fixture("savefail");
+        // L4 fully shadowed (delete path) and L3 partially shadowed (rewrite path).
+        let l4 = f.add(4, &[("a", Some("1")), ("b", Some("2"))]);
+        let l3 = f.add(3, &[("a", Some("10")), ("b", Some("20")), ("c", Some("30")), ("d", Some("40"))]);
+        f.add(1, &[("a", Some("100")), ("b", Some("200")), ("c", Some("300"))]);
+        let keys = ["a", "b", "c", "d", "zz"];
+        let before: Vec<_> = keys.iter().map(|k| f.get(k)).collect();
+        let snap_before = f.manifest.snapshot();
+        let disk_manifest_before = fs::read_to_string(f.dir.join("MANIFEST")).unwrap();
+        let files_before = f.sst_files_on_disk();
+
+        f.manifest.fail_next_saves(1000);
+        let p = f.run(cfg());
+        assert_eq!(st(&p, "files_failed"), "2", "{p:?}");
+        assert_eq!(st(&p, "files_deleted"), "0");
+        assert_eq!(st(&p, "files_rewritten"), "0");
+        assert!(f.dir.join(&l4).exists() && f.dir.join(&l3).exists(), "inputs must be kept");
+        assert_eq!(f.manifest.snapshot(), snap_before, "in-memory manifest rolled back");
+        assert_eq!(fs::read_to_string(f.dir.join("MANIFEST")).unwrap(), disk_manifest_before);
+        assert_eq!(f.sst_files_on_disk(), files_before, "unpublished output removed");
+        assert_eq!(keys.iter().map(|k| f.get(k)).collect::<Vec<_>>(), before);
+
+        f.manifest.fail_next_saves(0);
+        let p = f.run(cfg());
+        assert_eq!(st(&p, "files_failed"), "0");
+        assert_eq!(st(&p, "files_deleted"), "1");
+        assert_eq!(st(&p, "files_rewritten"), "1");
+        assert!(!f.dir.join(&l4).exists() && !f.dir.join(&l3).exists());
+        assert_eq!(keys.iter().map(|k| f.get(k)).collect::<Vec<_>>(), before);
         let in_manifest: usize = f.manifest.snapshot().iter().map(|l| l.len()).sum();
         assert_eq!(in_manifest, f.sst_files_on_disk());
     }

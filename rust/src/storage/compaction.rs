@@ -3,8 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use super::manifest::Manifest;
 use super::sstable::{SSTableReader, SSTableWriter};
@@ -33,10 +34,12 @@ pub struct Compaction {
     pub(super) data_dir: PathBuf,
     pub(super) manifest: Arc<Manifest>,
     /// Cache of mmapped SST readers. INVARIANT: only files that are in the manifest may be
-    /// inserted here. `get_or_open_reader` checks manifest membership while holding the
-    /// write lock of this map, and every compaction path removes a file from the manifest
-    /// *before* evicting it here, so a reader can never re-insert a file that compaction has
-    /// already dropped (that race leaked deleted-but-mapped SSTs, ForgeKV <= 0.3.1).
+    /// inserted here. Every compaction path removes a file from the manifest (and saves it)
+    /// *before* `retire_files` bumps `retire_gen` and evicts it; `get_or_open_reader` only
+    /// inserts if the file was in the manifest and `retire_gen` did not move in between, so a
+    /// reader can never re-insert a file that compaction has already dropped (that race
+    /// leaked deleted-but-mapped SSTs, ForgeKV <= 0.3.1). The miss path never holds this
+    /// lock while waiting on the manifest lock.
     pub(super) open_readers: RwLock<HashMap<String, Arc<SSTableReader>>>,
     /// Readers opened for a file that was no longer in the manifest (served once, not cached).
     pub(super) uncached_opens: AtomicU64,
@@ -44,6 +47,17 @@ pub struct Compaction {
     /// COMPACT FULL keeps replaced inputs cached for their grace period; it must not grow
     /// with normal compaction.
     pub(super) obsolete_evicted: AtomicU64,
+    /// Bumped by `retire_files` after the files left the manifest and before they are
+    /// evicted. `get_or_open_reader` only caches when it is unchanged across its manifest
+    /// check, which lets it check the manifest without holding the `open_readers` lock.
+    retire_gen: AtomicU64,
+    /// Rate-limited result of the /proc/self/maps scan used by INFO (see
+    /// `deleted_sst_mappings_cached`).
+    deleted_maps_cache: Mutex<Option<(Instant, (usize, u64))>>,
+    /// Tests only: switches that disable one safety mechanism at a time, so the regression
+    /// tests can prove each one is what keeps the leak away.
+    #[cfg(test)]
+    pub(super) test_hooks: TestHooks,
     /// Prevent overlapping compaction passes (bg thread + post-flush).
     pub(super) compacting: AtomicBool,
     /// Set by flush worker; bg compaction thread clears and runs.
@@ -60,6 +74,10 @@ impl Compaction {
             open_readers: RwLock::new(HashMap::new()),
             uncached_opens: AtomicU64::new(0),
             obsolete_evicted: AtomicU64::new(0),
+            retire_gen: AtomicU64::new(0),
+            deleted_maps_cache: Mutex::new(None),
+            #[cfg(test)]
+            test_hooks: TestHooks::default(),
             compacting: AtomicBool::new(false),
             compact_requested: AtomicBool::new(false),
             full: super::full_compaction::FullState::default(),
@@ -74,25 +92,51 @@ impl Compaction {
             }
         }
 
+        // Miss path: open + check the manifest without holding the open_readers lock.
+        // `retire_files` removes a file from the manifest, THEN bumps retire_gen, THEN evicts
+        // under the write lock. So if the generation is unchanged when we insert (under the
+        // write lock), any retirement of `path` that our manifest check missed has not
+        // evicted yet and will evict our entry after we release the lock.
+        let gen = self.retire_gen.load(Ordering::SeqCst);
         let full_path = self.data_dir.join(path);
         let reader = Arc::new(SSTableReader::open(&full_path)?);
+        let live = self.manifest.contains(path) || self.manifest_check_disabled();
+        #[cfg(test)]
+        {
+            // Fault injection: model a reader preempted between its manifest check and the
+            // insert, which is exactly where a concurrent retirement must not slip through.
+            let us = self.test_hooks.open_to_insert_delay_us.load(Ordering::Relaxed);
+            if us > 0 {
+                std::thread::sleep(std::time::Duration::from_micros(us));
+            }
+        }
 
         let mut readers = self.open_readers.write();
         if let Some(r) = readers.get(path) {
             // Another thread cached it while we were opening; drop our duplicate mapping.
             return Ok(r.clone());
         }
-        // Lock order: open_readers -> manifest. Compaction removes the file from the manifest
-        // before it takes this lock to evict, so this check cannot miss a removal that a later
-        // eviction would not also catch.
-        if self.manifest.contains(path) {
+        if live
+            && (self.retire_gen.load(Ordering::SeqCst) == gen || self.manifest_check_disabled())
+        {
             readers.insert(path.to_string(), reader.clone());
         } else {
-            // Caller is working from a stale manifest snapshot. Serve this one read from a
-            // private mapping that is unmapped as soon as the caller drops it.
+            // Caller is working from a stale manifest snapshot (or a retirement raced us).
+            // Serve this one read from a private mapping that is unmapped as soon as the
+            // caller drops it.
             self.uncached_opens.fetch_add(1, Ordering::Relaxed);
         }
         Ok(reader)
+    }
+
+    #[cfg(test)]
+    fn manifest_check_disabled(&self) -> bool {
+        self.test_hooks.disable_manifest_check.load(Ordering::SeqCst)
+    }
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn manifest_check_disabled(&self) -> bool {
+        false
     }
 
     pub fn close_reader(&self, path: &str) {
@@ -104,6 +148,10 @@ impl Compaction {
     /// from disk, then evict once more (belt and braces) so no cached mmap outlives the unlink.
     /// Callers must already have removed `files` from the manifest (and saved it).
     pub(super) fn retire_files(&self, files: &[String]) {
+        if files.is_empty() {
+            return;
+        }
+        self.retire_gen.fetch_add(1, Ordering::SeqCst);
         for f in files {
             self.close_reader(f);
         }
@@ -130,6 +178,31 @@ impl Compaction {
             self.obsolete_evicted.fetch_add(n as u64, Ordering::Relaxed);
         }
         n
+    }
+
+    /// The sweep run after every compaction pass / COMPACT FULL job.
+    pub(super) fn auto_sweep(&self) {
+        #[cfg(test)]
+        if self.test_hooks.disable_auto_sweep.load(Ordering::SeqCst) {
+            return;
+        }
+        self.evict_obsolete_readers();
+    }
+
+    /// `deleted_sst_mappings` for INFO, recomputed at most once per `max_age` (reading
+    /// /proc/self/maps costs O(mappings); INFO may be polled often). Returns
+    /// (files, bytes, age of the value).
+    pub fn deleted_sst_mappings_cached(&self, max_age: Duration) -> (usize, u64, Duration) {
+        let mut cache = self.deleted_maps_cache.lock();
+        if let Some((at, v)) = *cache {
+            let age = at.elapsed();
+            if age < max_age {
+                return (v.0, v.1, age);
+            }
+        }
+        let v = deleted_sst_mappings(&self.data_dir);
+        *cache = Some((Instant::now(), v));
+        (v.0, v.1, Duration::ZERO)
     }
 
     /// (cached readers, cached readers whose file is not in the manifest).
@@ -162,7 +235,7 @@ impl Compaction {
                 break;
             }
         }
-        self.evict_obsolete_readers();
+        self.auto_sweep();
         self.compacting.store(false, Ordering::SeqCst);
     }
 
@@ -336,26 +409,60 @@ impl Compaction {
             merged
         };
 
-        let new_files = self.write_compacted_files(merged, 1);
+        let new_files = match self.write_compacted_files(merged, 1) {
+            Some(f) => f,
+            None => return, // write failed: inputs untouched, retried next pass
+        };
 
         // Publish the new version first (manifest), THEN evict + unlink the inputs. Evicting
         // before the manifest update let a concurrent GET/SCAN re-map an input into the cache
         // after close_reader, leaking it as a deleted-but-mapped file forever.
-        for f in &l0_files {
-            self.manifest.remove_file(0, f);
+        // Remove only the L1 files we actually merged.
+        if !self.publish(&[(0, &l0_files[..]), (1, &l1_files[..])], 1, &new_files) {
+            return;
         }
-        // Remove only the L1 files we actually merged
-        for f in &l1_files {
-            self.manifest.remove_file(1, f);
-        }
-        for f in &new_files {
-            self.manifest.add_file(1, f.clone());
-        }
-        let _ = self.manifest.save();
-
         let mut retired = l0_files;
         retired.extend(l1_files);
         self.retire_files(&retired);
+    }
+
+    /// Atomically (w.r.t. the manifest lock) remove `removals` and append `new_files` to
+    /// `out_level`, and persist it. On a failed save the manifest change is rolled back,
+    /// the unpublished outputs are deleted and false is returned: the inputs must then be
+    /// kept (no eviction, no unlink) — unlinking files the on-disk MANIFEST still lists
+    /// would lose data on the next restart.
+    fn publish(&self, removals: &[(usize, &[String])], out_level: usize, new_files: &[String]) -> bool {
+        let res = self.manifest.apply_and_save(|levels| {
+            for (lvl, files) in removals {
+                if let Some(l) = levels.get_mut(*lvl) {
+                    l.retain(|x| !files.contains(x));
+                }
+            }
+            while levels.len() <= out_level {
+                levels.push(Vec::new());
+            }
+            levels[out_level].extend(new_files.iter().cloned());
+        });
+        match res {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "ERROR compaction: manifest save failed ({e}); keeping {} input file(s), discarding {} unpublished output(s)",
+                    removals.iter().map(|(_, f)| f.len()).sum::<usize>(),
+                    new_files.len()
+                );
+                self.discard_unpublished(new_files);
+                false
+            }
+        }
+    }
+
+    /// Delete output files that never made it into the manifest.
+    fn discard_unpublished(&self, files: &[String]) {
+        for f in files {
+            self.close_reader(f);
+            let _ = std::fs::remove_file(self.data_dir.join(f));
+        }
     }
 
     /// Promote an oversized level into the next level (never rewrite in-place).
@@ -406,18 +513,14 @@ impl Compaction {
             merged
         };
 
-        let new_files = self.write_compacted_files(merged, next_level);
+        let new_files = match self.write_compacted_files(merged, next_level) {
+            Some(f) => f,
+            None => return, // write failed: inputs untouched, retried next pass
+        };
 
-        for f in &batch {
-            self.manifest.remove_file(level, f);
+        if !self.publish(&[(level, &batch[..]), (next_level, &next_batch[..])], next_level, &new_files) {
+            return;
         }
-        for f in &next_batch {
-            self.manifest.remove_file(next_level, f);
-        }
-        for f in &new_files {
-            self.manifest.add_file(next_level, f.clone());
-        }
-        let _ = self.manifest.save();
 
         // Evict + unlink only after the manifest no longer lists the inputs (see compact_l0_to_l1).
         let mut retired = batch;
@@ -444,11 +547,11 @@ impl Compaction {
         &self,
         entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
         level: usize,
-    ) -> Vec<String> {
+    ) -> Option<Vec<String>> {
         let mut new_files = Vec::new();
 
         if entries.is_empty() {
-            return new_files;
+            return Some(new_files);
         }
 
         let mut chunk: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
@@ -460,8 +563,14 @@ impl Compaction {
             chunk.insert(k, v);
 
             if chunk_size >= TARGET_FILE_SIZE {
-                if let Some(filename) = self.write_chunk(&chunk, level) {
-                    new_files.push(filename);
+                match self.write_chunk(&chunk, level) {
+                    Some(filename) => new_files.push(filename),
+                    None => {
+                        // A lost chunk would silently drop data once the inputs are unlinked.
+                        eprintln!("ERROR compaction: writing an L{level} output failed; aborting this pass, inputs kept");
+                        self.discard_unpublished(&new_files);
+                        return None;
+                    }
                 }
                 chunk.clear();
                 chunk_size = 0;
@@ -469,12 +578,17 @@ impl Compaction {
         }
 
         if !chunk.is_empty() {
-            if let Some(filename) = self.write_chunk(&chunk, level) {
-                new_files.push(filename);
+            match self.write_chunk(&chunk, level) {
+                Some(filename) => new_files.push(filename),
+                None => {
+                    eprintln!("ERROR compaction: writing an L{level} output failed; aborting this pass, inputs kept");
+                    self.discard_unpublished(&new_files);
+                    return None;
+                }
             }
         }
 
-        new_files
+        Some(new_files)
     }
 
     fn write_chunk(
@@ -496,9 +610,21 @@ impl Compaction {
             }
             Some(filename)
         } else {
+            let _ = std::fs::remove_file(&path);
             None
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct TestHooks {
+    /// Cache every opened reader without the manifest/generation check (pre-0.3.2 behaviour).
+    pub disable_manifest_check: AtomicBool,
+    /// Skip the obsolete-reader sweep after compaction passes / COMPACT FULL jobs.
+    pub disable_auto_sweep: AtomicBool,
+    /// Sleep this long between the manifest check and the cache insert on a miss.
+    pub open_to_insert_delay_us: AtomicU64,
 }
 
 /// Count SST files under `data_dir` that are still mmapped by this process although they have
@@ -548,8 +674,9 @@ mod mmap_leak_tests {
     //! Regression tests for the deleted-but-mapped SST leak (ForgeKV <= 0.3.1): a GET/SCAN
     //! that re-opened an input file between `close_reader` and `remove_file` re-inserted it
     //! into `open_readers`, and nothing ever evicted it, so the unlinked file kept its disk
-    //! space for the life of the process. These tests only use the `open_readers` map and
-    //! /proc/self/maps so they compile against the old code as well (used for the repro).
+    //! space for the life of the process. The race test disables the automatic sweep
+    //! (which would otherwise hide a leak) and samples the cache and /proc/self/maps while it
+    //! runs; a companion test proves it fails with the manifest check disabled.
     use super::*;
     use crate::storage::full_compaction::FullCompactConfig;
     use std::collections::{BTreeMap, HashSet};
@@ -568,6 +695,10 @@ mod mmap_leak_tests {
 
     /// Unique deleted .sst inodes under `dir` that this process still maps.
     fn deleted_maps_under(dir: &Path) -> usize {
+        deleted_inodes_under(dir).len()
+    }
+
+    fn deleted_inodes_under(dir: &Path) -> HashSet<String> {
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
         let pre = dir.to_string_lossy().to_string();
         let mut inodes = HashSet::new();
@@ -578,7 +709,7 @@ mod mmap_leak_tests {
                 }
             }
         }
-        inodes.len()
+        inodes
     }
 
     fn cached_not_in_manifest(comp: &Compaction, manifest: &Manifest) -> Vec<String> {
@@ -597,14 +728,35 @@ mod mmap_leak_tests {
         name
     }
 
+    struct RaceResult {
+        flushed: usize,
+        full_runs: usize,
+        samples: usize,
+        /// Max deleted-but-mapped inodes seen in two consecutive samples (>= 100 ms apart).
+        persistent_deleted: usize,
+        /// Max non-manifest reader-cache entries seen in two consecutive samples.
+        persistent_obsolete: usize,
+        final_deleted: usize,
+        final_obsolete: Vec<String>,
+    }
+
     /// Concurrent GET + SCAN loops while L0 files keep arriving, normal compaction runs
-    /// continuously and a COMPACT FULL job rewrites the deep levels. Afterwards no unlinked
-    /// SST may still be mapped and the reader cache may only hold manifest files.
-    #[test]
-    fn concurrent_get_scan_during_compaction_and_compact_full_leaks_nothing() {
+    /// continuously and COMPACT FULL rewrites the deep levels for `secs`. The automatic
+    /// obsolete-reader sweep is DISABLED so it cannot hide a leak: the reader cache must stay
+    /// clean through the manifest check alone. A monitor samples /proc/self/maps and the
+    /// cache every 100 ms; readers sleep 300 us between their manifest check and the cache
+    /// insert to widen the race window; an entry that survives two consecutive samples is a leak
+    /// (legitimate transients — an uncached read in flight, the 5 ms COMPACT FULL grace,
+    /// the evict/unlink window — last microseconds to milliseconds).
+    fn run_race(disable_manifest_check: bool, secs: u64) -> RaceResult {
         let dir = temp_dir("race");
         let manifest = Arc::new(Manifest::new(dir.join("MANIFEST")));
         let comp = Arc::new(Compaction::new(dir.clone(), manifest.clone()));
+        comp.test_hooks.disable_auto_sweep.store(true, Ordering::SeqCst);
+        comp.test_hooks.disable_manifest_check.store(disable_manifest_check, Ordering::SeqCst);
+        // Widen the check->insert window (a preempted reader) so a missing check shows up
+        // reliably instead of once in a few runs.
+        comp.test_hooks.open_to_insert_delay_us.store(300, Ordering::SeqCst);
 
         // Deep levels with old versions, so COMPACT FULL has shadowed data to drop.
         for part in 0..8u32 {
@@ -668,11 +820,30 @@ mod mmap_leak_tests {
                 }
             }));
         }
+        // Monitor: periodic in-run samples.
+        let monitor = {
+            let (dir, manifest, comp, stop) = (dir.clone(), manifest.clone(), comp.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut prev_del, mut prev_obs) = (HashSet::new(), HashSet::new());
+                let (mut max_del, mut max_obs, mut samples) = (0usize, 0usize, 0usize);
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let del = deleted_inodes_under(&dir);
+                    let obs: HashSet<String> = cached_not_in_manifest(&comp, &manifest).into_iter().collect();
+                    max_del = max_del.max(del.intersection(&prev_del).count());
+                    max_obs = max_obs.max(obs.intersection(&prev_obs).count());
+                    prev_del = del;
+                    prev_obs = obs;
+                    samples += 1;
+                }
+                (max_del, max_obs, samples)
+            })
+        };
 
         // COMPACT FULL rounds while all of the above runs.
         let t0 = Instant::now();
         let mut full_runs = 0;
-        while t0.elapsed() < Duration::from_secs(6) {
+        while t0.elapsed() < Duration::from_secs(secs) {
             let cfg = FullCompactConfig {
                 rate_mb_s: 0,
                 min_free_bytes: 0,
@@ -691,23 +862,59 @@ mod mmap_leak_tests {
         for t in threads {
             t.join().unwrap();
         }
-        // Quiesce: one last pass so nothing is mid-flight.
+        let (persistent_deleted, persistent_obsolete, samples) = monitor.join().unwrap();
+        // Quiesce with one more compaction pass (the sweep is still disabled).
         comp.maybe_compact();
 
-        let leaked = deleted_maps_under(&dir);
-        let obsolete = cached_not_in_manifest(&comp, &manifest);
-        eprintln!(
-            "mmap-leak race: l0_files_flushed={} full_runs={} deleted_but_mapped={} obsolete_cached={}",
-            flushed.load(Ordering::Relaxed),
+        let r = RaceResult {
+            flushed: flushed.load(Ordering::Relaxed),
             full_runs,
-            leaked,
-            obsolete.len()
+            samples,
+            persistent_deleted,
+            persistent_obsolete,
+            final_deleted: deleted_maps_under(&dir),
+            final_obsolete: cached_not_in_manifest(&comp, &manifest),
+        };
+        eprintln!(
+            "mmap-leak race (manifest_check={}): l0_files_flushed={} full_runs={} samples={} \
+             in_run_persistent_deleted_max={} in_run_persistent_obsolete_max={} \
+             final_deleted_but_mapped={} final_obsolete_cached={}",
+            if disable_manifest_check { "OFF" } else { "on" },
+            r.flushed, r.full_runs, r.samples, r.persistent_deleted, r.persistent_obsolete,
+            r.final_deleted, r.final_obsolete.len()
         );
-        assert!(flushed.load(Ordering::Relaxed) > 200, "test must drive several compactions");
-        assert_eq!(obsolete, Vec::<String>::new(), "open_readers must only hold manifest files");
-        assert_eq!(leaked, 0, "no unlinked SST may stay mmapped");
         drop(comp);
         let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
+    fn assert_no_leak(r: &RaceResult) {
+        assert!(r.flushed > 200, "test must drive several compactions");
+        assert!(r.full_runs > 3, "test must drive several COMPACT FULL jobs");
+        assert!(r.samples > 10, "monitor must sample during the run");
+        assert_eq!(r.persistent_deleted, 0, "deleted-but-mapped SSTs persisted during the run");
+        assert_eq!(r.persistent_obsolete, 0, "non-manifest readers persisted in the cache during the run");
+        assert_eq!(r.final_obsolete, Vec::<String>::new(), "open_readers must only hold manifest files");
+        assert_eq!(r.final_deleted, 0, "no unlinked SST may stay mmapped");
+    }
+
+    /// The regression test. `FORGEKV_TEST_DISABLE_MANIFEST_CHECK=1` runs it with the
+    /// manifest check switched off, to show that it then fails.
+    #[test]
+    fn concurrent_get_scan_during_compaction_and_compact_full_leaks_nothing() {
+        let off = std::env::var("FORGEKV_TEST_DISABLE_MANIFEST_CHECK").map(|v| v == "1").unwrap_or(false);
+        assert_no_leak(&run_race(off, 6));
+    }
+
+    /// Mutation check for the test above: with the manifest check disabled (and the sweep
+    /// disabled, as in the test), the same workload must produce a detectable leak.
+    #[test]
+    fn race_test_detects_leak_when_manifest_check_disabled() {
+        let r = run_race(true, 4);
+        assert!(
+            r.final_deleted > 0 || !r.final_obsolete.is_empty() || r.persistent_deleted > 0,
+            "the race test no longer detects the leak it guards against"
+        );
     }
 
     /// Deterministic version of the race: a reader holding a stale manifest snapshot opens a
@@ -742,6 +949,76 @@ mod mmap_leak_tests {
 #[cfg(test)]
 mod reader_cache_tests {
     use super::*;
+
+    /// L0->L1 compaction with a failing MANIFEST save: inputs stay on disk, in the manifest
+    /// (memory and disk) and readable; the merged outputs are discarded; nothing is retired.
+    /// Once saves work again the same compaction succeeds.
+    #[test]
+    fn failed_manifest_save_in_compaction_keeps_inputs() {
+        let dir = std::env::temp_dir().join(format!(
+            "forgekv-savefail-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = Arc::new(Manifest::new(dir.join("MANIFEST")));
+        let comp = Compaction::new(dir.clone(), manifest.clone());
+        let mut inputs = Vec::new();
+        for i in 0..(L0_THRESHOLD as u32) {
+            let mut m = BTreeMap::new();
+            m.insert(format!("k{:03}", i % 40).into_bytes(), Some(format!("v{i}").into_bytes()));
+            let name = format!("L0-{}.sst", manifest.next_sequence());
+            SSTableWriter::write(&dir.join(&name), &m).unwrap();
+            manifest.add_file(0, name.clone());
+            inputs.push(name);
+        }
+        manifest.save().unwrap();
+        let read_all = |c: &Compaction| -> Vec<Option<Vec<u8>>> {
+            (0..40).map(|i| c.search_sstables(format!("k{i:03}").as_bytes()).flatten()).collect()
+        };
+        let before = read_all(&comp);
+        let snap = manifest.snapshot();
+        let disk = std::fs::read_to_string(dir.join("MANIFEST")).unwrap();
+        let count_ssts = || {
+            std::fs::read_dir(&dir).unwrap().filter(|e| {
+                e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".sst")
+            }).count()
+        };
+
+        manifest.fail_next_saves(1000);
+        comp.maybe_compact();
+        assert_eq!(manifest.snapshot(), snap, "in-memory manifest rolled back");
+        assert_eq!(std::fs::read_to_string(dir.join("MANIFEST")).unwrap(), disk);
+        assert!(inputs.iter().all(|f| dir.join(f).exists()), "inputs must not be unlinked");
+        assert_eq!(count_ssts(), inputs.len(), "unpublished outputs removed");
+        assert_eq!(read_all(&comp), before);
+        assert_eq!(comp.reader_cache_stats().1, 0);
+
+        manifest.fail_next_saves(0);
+        comp.maybe_compact();
+        assert!(manifest.get_level(0).is_empty() && !manifest.get_level(1).is_empty());
+        assert!(inputs.iter().all(|f| !dir.join(f).exists()));
+        assert_eq!(read_all(&comp), before);
+        assert_eq!(comp.reader_cache_stats().1, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn info_deleted_maps_scan_is_rate_limited() {
+        let dir = std::env::temp_dir().join(format!(
+            "forgekv-mapscache-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let comp = Compaction::new(dir.clone(), Arc::new(Manifest::new(dir.join("MANIFEST"))));
+        let (_, _, age0) = comp.deleted_sst_mappings_cached(Duration::from_secs(10));
+        assert_eq!(age0, Duration::ZERO, "first call scans");
+        std::thread::sleep(Duration::from_millis(20));
+        let (_, _, age1) = comp.deleted_sst_mappings_cached(Duration::from_secs(10));
+        assert!(age1 >= Duration::from_millis(20), "second call served from cache");
+        let (_, _, age2) = comp.deleted_sst_mappings_cached(Duration::from_millis(1));
+        assert_eq!(age2, Duration::ZERO, "expired value is rescanned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sweep_evicts_non_manifest_readers_and_maps_parser_counts_inodes() {

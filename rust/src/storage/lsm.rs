@@ -494,8 +494,13 @@ impl LsmStorage {
     }
 
     /// Unlinked SST files still mmapped by this process: (files, bytes). Reads /proc/self/maps.
-    pub fn deleted_sst_mappings(&self) -> (usize, u64) {
-        super::compaction::deleted_sst_mappings(&self.data_dir)
+    /// Deleted-but-mapped SSTs for INFO: rescans /proc/self/maps at most every 10 s and
+    /// returns the cached value otherwise. (files, bytes, age of the value in ms).
+    pub fn deleted_sst_mappings(&self) -> (usize, u64, u64) {
+        let (f, b, age) = self
+            .compaction
+            .deleted_sst_mappings_cached(std::time::Duration::from_secs(10));
+        (f, b, age.as_millis() as u64)
     }
 
     /// Admin/COMPACT: run compaction passes in the background-friendly API.
