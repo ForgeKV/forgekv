@@ -922,6 +922,11 @@ impl RedisDatabase {
         self.storage.stats()
     }
 
+    /// Unlinked SST files still mmapped by this process: (files, bytes).
+    pub fn lsm_deleted_sst_mappings(&self) -> (usize, u64, u64) {
+        self.storage.deleted_sst_mappings()
+    }
+
     pub fn compact_lsm(&self) {
         self.storage.compact_now();
     }

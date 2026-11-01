@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
@@ -8,6 +10,9 @@ pub struct Manifest {
     path: PathBuf,
     levels: Mutex<Vec<Vec<String>>>,
     next_sequence: Mutex<u64>,
+    /// Tests only: make the next N saves fail with an injected I/O error.
+    #[cfg(test)]
+    fail_saves: AtomicUsize,
 }
 
 impl Manifest {
@@ -16,7 +21,15 @@ impl Manifest {
             path,
             levels: Mutex::new(Vec::new()),
             next_sequence: Mutex::new(1),
+            #[cfg(test)]
+            fail_saves: AtomicUsize::new(0),
         }
+    }
+
+    /// Tests only: the next `n` calls that write the MANIFEST fail with an injected error.
+    #[cfg(test)]
+    pub fn fail_next_saves(&self, n: usize) {
+        self.fail_saves.store(n, Ordering::SeqCst);
     }
 
     pub fn load(&self) -> io::Result<()> {
@@ -70,6 +83,36 @@ impl Manifest {
 
     pub fn save(&self) -> io::Result<()> {
         let levels = self.levels.lock();
+        self.write_file(&levels)
+    }
+
+    /// Apply `f` to the levels and persist the result atomically with respect to other
+    /// manifest users (the levels lock is held across the change and the write). If the
+    /// write fails the in-memory change is rolled back, so memory and disk never disagree
+    /// and the caller can keep (not unlink) the files it meant to replace.
+    pub fn apply_and_save<R>(&self, f: impl FnOnce(&mut Vec<Vec<String>>) -> R) -> io::Result<R> {
+        let mut levels = self.levels.lock();
+        let before = levels.clone();
+        let r = f(&mut levels);
+        if let Err(e) = self.write_file(&levels) {
+            *levels = before;
+            return Err(e);
+        }
+        Ok(r)
+    }
+
+    /// Write `levels` (caller holds the levels lock) to disk via write-then-rename.
+    fn write_file(&self, levels: &[Vec<String>]) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            if self
+                .fail_saves
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(io::Error::new(io::ErrorKind::Other, "injected manifest save failure"));
+            }
+        }
         let seq = self.next_sequence.lock();
         let mut content = String::new();
 
@@ -80,6 +123,7 @@ impl Manifest {
                 content.push_str(&format!("L|{}|{}\n", i, level.join(",")));
             }
         }
+        drop(seq);
 
         // Write-then-rename so a crash can never leave a truncated MANIFEST.
         let tmp = self.path.with_extension("tmp");
@@ -95,6 +139,12 @@ impl Manifest {
         } else {
             Vec::new()
         }
+    }
+
+    /// True if `path` is listed at any level.
+    pub fn contains(&self, path: &str) -> bool {
+        let levels = self.levels.lock();
+        levels.iter().any(|l| l.iter().any(|f| f == path))
     }
 
     pub fn level_count(&self) -> usize {
@@ -129,21 +179,18 @@ impl Manifest {
     /// Returns false (and changes nothing) if `old` is not in the level.
     pub fn replace_in_place(&self, level: usize, old: &str, new: Option<String>) -> bool {
         let mut levels = self.levels.lock();
-        if level >= levels.len() {
-            return false;
-        }
-        match levels[level].iter().position(|f| f == old) {
-            Some(idx) => {
-                match new {
-                    Some(n) => levels[level][idx] = n,
-                    None => {
-                        levels[level].remove(idx);
-                    }
-                }
-                true
-            }
-            None => false,
-        }
+        replace_in_levels(&mut levels, level, old, new)
+    }
+
+    /// `replace_in_place` + save as one step; on a failed save the swap is rolled back and
+    /// the error returned (the caller must then keep `old` on disk).
+    pub fn replace_in_place_and_save(
+        &self,
+        level: usize,
+        old: &str,
+        new: Option<String>,
+    ) -> io::Result<bool> {
+        self.apply_and_save(|levels| replace_in_levels(levels, level, old, new))
     }
 
     /// Snapshot of every level (index = level).
@@ -175,5 +222,23 @@ impl Manifest {
         for f in output_files {
             levels[output_level].push(f);
         }
+    }
+}
+
+fn replace_in_levels(levels: &mut [Vec<String>], level: usize, old: &str, new: Option<String>) -> bool {
+    if level >= levels.len() {
+        return false;
+    }
+    match levels[level].iter().position(|f| f == old) {
+        Some(idx) => {
+            match new {
+                Some(n) => levels[level][idx] = n,
+                None => {
+                    levels[level].remove(idx);
+                }
+            }
+            true
+        }
+        None => false,
     }
 }
