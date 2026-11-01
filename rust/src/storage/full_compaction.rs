@@ -330,6 +330,7 @@ impl Compaction {
             }
         }
         self.purge_pending(&mut pending, true);
+        self.evict_obsolete_readers();
         end_state
     }
 
@@ -346,8 +347,9 @@ impl Compaction {
         let now = Instant::now();
         pending.retain(|p| {
             if p.deadline <= now {
-                self.close_reader(&p.file);
-                let _ = fs::remove_file(self.data_dir.join(&p.file));
+                // The file was already removed from the manifest by full_step, so
+                // get_or_open_reader can no longer cache it; evict, unlink, evict again.
+                self.retire_files(std::slice::from_ref(&p.file));
                 let _ = p.level;
                 false
             } else {

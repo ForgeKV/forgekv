@@ -45,6 +45,14 @@ pub struct LsmStats {
     pub l0_files: usize,
     pub total_sst_files: usize,
     pub level_files: Vec<usize>,
+    /// Cached mmapped SST readers.
+    pub sst_open_readers: usize,
+    /// Cached readers whose file is no longer in the manifest (leak indicator; 0 when idle).
+    pub sst_obsolete_readers: usize,
+    /// Reads served from a non-cached reader because the file had just left the manifest.
+    pub sst_uncached_opens: u64,
+    /// Cached readers evicted by the obsolete-reader sweep.
+    pub sst_obsolete_evicted: u64,
 }
 
 pub struct LsmStorage {
@@ -466,7 +474,12 @@ impl LsmStorage {
         let level_files = self.compaction.level_file_counts();
         let l0_files = level_files.first().copied().unwrap_or(0);
         let total_sst_files = level_files.iter().sum();
+        let (sst_open_readers, sst_obsolete_readers) = self.compaction.reader_cache_stats();
         LsmStats {
+            sst_open_readers,
+            sst_obsolete_readers,
+            sst_uncached_opens: self.compaction.uncached_opens.load(Ordering::Relaxed),
+            sst_obsolete_evicted: self.compaction.obsolete_evicted.load(Ordering::Relaxed),
             memtable_shard_bytes: self.memtable_shard_bytes,
             pending_flushes: self.pending_flushes.load(Ordering::Relaxed),
             flushes_completed: self.flushes_completed.load(Ordering::Relaxed),
@@ -478,6 +491,11 @@ impl LsmStorage {
             total_sst_files,
             level_files,
         }
+    }
+
+    /// Unlinked SST files still mmapped by this process: (files, bytes). Reads /proc/self/maps.
+    pub fn deleted_sst_mappings(&self) -> (usize, u64) {
+        super::compaction::deleted_sst_mappings(&self.data_dir)
     }
 
     /// Admin/COMPACT: run compaction passes in the background-friendly API.

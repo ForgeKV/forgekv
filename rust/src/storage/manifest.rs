@@ -97,6 +97,12 @@ impl Manifest {
         }
     }
 
+    /// True if `path` is listed at any level.
+    pub fn contains(&self, path: &str) -> bool {
+        let levels = self.levels.lock();
+        levels.iter().any(|l| l.iter().any(|f| f == path))
+    }
+
     pub fn level_count(&self) -> usize {
         let levels = self.levels.lock();
         levels.len()
