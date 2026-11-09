@@ -8,6 +8,7 @@ mod compression;
 mod config;
 mod database;
 mod ext_type_registry;
+mod heap;
 mod keyspace;
 mod lua_engine;
 mod pubsub;
@@ -583,6 +584,17 @@ fn load_config_file() -> ServerConfig {
     }
 }
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// jemalloc defaults when built with `--features jemalloc`: a background thread returns dirty
+/// pages after ~5 s. Override at runtime with the `_RJEM_MALLOC_CONF` environment variable.
+#[cfg(feature = "jemalloc")]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: &[u8; 63] = b"background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";
+
 fn main() {
     let base_config = load_config();
     // Honor io-threads: size the blocking pool so GET/SET (spawn_blocking) can
@@ -595,6 +607,14 @@ fn main() {
         base_config.bind, base_config.port, io_threads, blocking_threads
     );
     eprintln!("Data directory: {}", base_config.dir);
+    heap::start(base_config.heap_release, base_config.heap_release_interval_secs);
+    eprintln!(
+        "Heap: allocator={} release={} interval={}s; memtable shard budget={} bytes",
+        heap::allocator_name(),
+        if base_config.heap_release { "trim" } else { "off" },
+        base_config.heap_release_interval_secs,
+        storage::LsmStorage::shard_budget(&base_config)
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

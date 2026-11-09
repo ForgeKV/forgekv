@@ -22,13 +22,15 @@ const NUM_SHARDS: usize = 256;
 /// Per-shard memtable state (active + one immutable slot).
 struct MemShard {
     active: MemTable,
-    immutable: Option<MemTable>,
+    /// Frozen memtable being flushed. Shared (not cloned) with the flush worker so a
+    /// rotation does not double the memtable's heap footprint while the SST is written.
+    immutable: Option<Arc<MemTable>>,
     immutable_flushing: bool,
 }
 
 struct FlushPlan {
     shard: usize,
-    snapshot: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    snapshot: Arc<MemTable>,
     archive: Option<std::path::PathBuf>,
 }
 
@@ -36,6 +38,11 @@ struct FlushPlan {
 #[derive(Debug, Clone)]
 pub struct LsmStats {
     pub memtable_shard_bytes: usize,
+    /// Total memtable budget (active + immutable across all shards), bytes.
+    pub memtable_budget_bytes: usize,
+    /// Accounted bytes currently held in memtables (active + immutable).
+    pub memtable_bytes: usize,
+    pub memtable_entries: usize,
     pub pending_flushes: u64,
     pub flushes_completed: u64,
     pub write_stalls: u64,
@@ -123,12 +130,7 @@ impl LsmStorage {
         let data_dir = PathBuf::from(&config.dir);
         fs::create_dir_all(&data_dir)?;
 
-        // Divide total memtable budget equally across shards.
-        // Floor at 1MB/shard so low configs are not silently inflated to 2GB
-        // (8MB×256), while still avoiding tiny ~KB SST storms.
-        // memtable-size-mb 2048 → 8MB/shard; 256 → 1MB/shard.
-        let total_bytes = (config.memtable_size_mb * 1024 * 1024) as usize;
-        let memtable_shard_bytes = (total_bytes / NUM_SHARDS).max(1024 * 1024);
+        let memtable_shard_bytes = Self::shard_budget(&config);
 
         let write_through = config.wal_sync_mode == crate::config::WalSyncMode::Always;
 
@@ -239,9 +241,12 @@ impl LsmStorage {
                                     Self::flush_snapshot_to_l0_static(
                                         &data_dir,
                                         &manifest,
-                                        &plan.snapshot,
+                                        plan.snapshot.data(),
                                     )
                                     .is_ok();
+                                // Drop our reference before clearing the slot so the
+                                // memtable is freed as soon as the shard releases it.
+                                drop(plan.snapshot);
                                 {
                                     let mut mem = mem_shards[plan.shard].write();
                                     if flush_ok {
@@ -264,6 +269,7 @@ impl LsmStorage {
                                 flush_cv.1.notify_all();
                                 // Never compact on the flush thread — only signal.
                                 compaction.request_compact();
+                                crate::heap::request_release();
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => continue,
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -298,6 +304,23 @@ impl LsmStorage {
             .expect("compaction thread");
 
         Ok(storage)
+    }
+
+    /// Per-shard active-memtable limit.
+    ///
+    /// Default (`memtable-size-mb`): total / 256 shards, floor 1 MiB/shard
+    /// (2048 → 8 MiB/shard). Each shard can additionally hold one immutable memtable
+    /// while it flushes, so the real ceiling is ~2× the configured size.
+    ///
+    /// `FORGEKV_MEMTABLE_MAX_BYTES` (config `memtable_max_bytes` > 0) is a hard cap on
+    /// active + immutable across all shards: per shard = cap / (256 × 2), floor 128 KiB.
+    pub(crate) fn shard_budget(config: &ServerConfig) -> usize {
+        if config.memtable_max_bytes > 0 {
+            ((config.memtable_max_bytes as usize) / (NUM_SHARDS * 2)).max(128 * 1024)
+        } else {
+            let total_bytes = (config.memtable_size_mb * 1024 * 1024) as usize;
+            (total_bytes / NUM_SHARDS).max(1024 * 1024)
+        }
     }
 
     /// Collect all WAL entries that must be replayed, sorted by global sequence.
@@ -403,7 +426,7 @@ impl LsmStorage {
             mem.immutable_flushing = true;
             return Some(FlushPlan {
                 shard,
-                snapshot: imm.snapshot(),
+                snapshot: Arc::clone(imm),
                 archive: None,
             });
         }
@@ -414,16 +437,12 @@ impl LsmStorage {
             return None;
         }
         let new_active = MemTable::new(self.memtable_shard_bytes);
-        let old = std::mem::replace(&mut mem.active, new_active);
-        mem.immutable = Some(old);
+        let old = Arc::new(std::mem::replace(&mut mem.active, new_active));
+        mem.immutable = Some(Arc::clone(&old));
         mem.immutable_flushing = true;
         Some(FlushPlan {
             shard,
-            snapshot: mem
-                .immutable
-                .as_ref()
-                .expect("immutable just assigned")
-                .snapshot(),
+            snapshot: old,
             archive: Some(archive),
         })
     }
@@ -475,7 +494,20 @@ impl LsmStorage {
         let l0_files = level_files.first().copied().unwrap_or(0);
         let total_sst_files = level_files.iter().sum();
         let (sst_open_readers, sst_obsolete_readers) = self.compaction.reader_cache_stats();
+        let (mut memtable_bytes, mut memtable_entries) = (0usize, 0usize);
+        for shard in self.mem_shards.iter() {
+            let mem = shard.read();
+            memtable_bytes += mem.active.size_bytes();
+            memtable_entries += mem.active.count();
+            if let Some(ref imm) = mem.immutable {
+                memtable_bytes += imm.size_bytes();
+                memtable_entries += imm.count();
+            }
+        }
         LsmStats {
+            memtable_budget_bytes: self.memtable_shard_bytes * NUM_SHARDS * 2,
+            memtable_bytes,
+            memtable_entries,
             sst_open_readers,
             sst_obsolete_readers,
             sst_uncached_opens: self.compaction.uncached_opens.load(Ordering::Relaxed),
@@ -506,6 +538,7 @@ impl LsmStorage {
     /// Admin/COMPACT: run compaction passes in the background-friendly API.
     pub fn compact_now(&self) {
         self.compaction.maybe_compact();
+        crate::heap::request_release();
     }
 
     /// `COMPACT FULL`: start the throttled shadowed-version GC (see full_compaction.rs).
@@ -670,14 +703,23 @@ impl LsmStorage {
             merged.entry(k).or_insert(v);
         }
 
-        merged.into_iter().collect()
+        let out: Vec<_> = merged.into_iter().collect();
+        // Large range scans (SCAN/KEYS/DBSIZE/INFO keyspace…) materialise millions of
+        // entries; ask the heap releaser to hand the freed pages back once they drop.
+        if out.len() >= 100_000 {
+            crate::heap::request_release();
+        }
+        out
     }
 
     pub fn force_flush(&self) -> io::Result<()> {
         for shard in 0..NUM_SHARDS {
             let (imm_snap, active_snap) = {
                 let mut mem = self.mem_shards[shard].write();
-                let imm = mem.immutable.take().map(|m| m.into_snapshot());
+                let imm = mem
+                    .immutable
+                    .take()
+                    .map(|m| Arc::try_unwrap(m).map(|t| t.into_snapshot()).unwrap_or_else(|a| a.snapshot()));
                 let new_active = MemTable::new(self.memtable_shard_bytes);
                 let old = std::mem::replace(&mut mem.active, new_active);
                 (imm, old.into_snapshot())
