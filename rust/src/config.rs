@@ -73,7 +73,15 @@ pub struct ServerConfig {
     pub dbfilename: String,
     pub databases: usize,
     pub memtable_size_mb: u64,
+    /// Hard cap on all memtables (active + immutable, all shards), bytes. 0 = derive from
+    /// `memtable_size_mb` (env `FORGEKV_MEMTABLE_MAX_BYTES`).
+    pub memtable_max_bytes: u64,
     pub wal_sync_mode: WalSyncMode,
+    /// Return freed heap pages to the OS (env `FORGEKV_HEAP_RELEASE`: `off` | `trim`).
+    pub heap_release: bool,
+    /// Periodic release interval in seconds when `heap_release` is on (0 = only after
+    /// compactions, flushes and large scans). Env `FORGEKV_HEAP_RELEASE_INTERVAL`.
+    pub heap_release_interval_secs: u64,
 
     // String value compression (off by default)
     pub value_compression: CompressionMode,
@@ -198,7 +206,10 @@ impl Default for ServerConfig {
             dbfilename: "dump.rdb".to_string(),
             databases: 16,
             memtable_size_mb: 2048,
+            memtable_max_bytes: 0,
             wal_sync_mode: WalSyncMode::Everysec,
+            heap_release: false,
+            heap_release_interval_secs: 60,
             value_compression: CompressionMode::Off,
             value_compression_level: compression::DEFAULT_LEVEL,
             value_compression_min_size: compression::DEFAULT_MIN_SIZE as u64,
@@ -489,6 +500,9 @@ pub fn parse_memory_size_strict(s: &str) -> Option<u64> {
 /// | `FORGEKV_VALUE_COMPRESSION_MIN_SIZE` | bytes (`512`, `1kb`, ...) |
 /// | `FORGEKV_COMPRESS_ON_START` | `on`/`off` — start a throttled migration after startup |
 /// | `FORGEKV_COMPRESS_RATE` | keys/sec for that migration (0 = unlimited) |
+/// | `FORGEKV_MEMTABLE_MAX_BYTES` | hard cap on all memtables, bytes (`512mb`, `1gb`; 0 = off) |
+/// | `FORGEKV_HEAP_RELEASE` | `off` \| `trim` — return freed heap pages to the OS |
+/// | `FORGEKV_HEAP_RELEASE_INTERVAL` | seconds between periodic releases (0 = event-driven only) |
 ///
 /// An unset or empty variable leaves the config-file value untouched. An invalid value is a hard
 /// error (never silently ignored): the caller prints it and refuses to start.
@@ -542,6 +556,40 @@ where
             )
         })?;
     }
+    if let Some(v) = val("FORGEKV_MEMTABLE_MAX_BYTES") {
+        config.memtable_max_bytes = parse_memory_size_strict(&v).ok_or_else(|| {
+            format!(
+                "invalid FORGEKV_MEMTABLE_MAX_BYTES '{}' (expected bytes, e.g. 512mb, 1gb)",
+                v
+            )
+        })?;
+        if config.memtable_max_bytes != 0 && config.memtable_max_bytes < 64 * 1024 * 1024 {
+            return Err(format!(
+                "invalid FORGEKV_MEMTABLE_MAX_BYTES '{}' (minimum 64mb, or 0 to disable)",
+                v
+            ));
+        }
+    }
+    if let Some(v) = val("FORGEKV_HEAP_RELEASE") {
+        config.heap_release = match v.to_ascii_lowercase().as_str() {
+            "trim" | "on" | "yes" | "true" | "1" => true,
+            "off" | "no" | "false" | "0" => false,
+            _ => {
+                return Err(format!(
+                    "invalid FORGEKV_HEAP_RELEASE '{}' (expected off|trim)",
+                    v
+                ))
+            }
+        };
+    }
+    if let Some(v) = val("FORGEKV_HEAP_RELEASE_INTERVAL") {
+        config.heap_release_interval_secs = v.parse::<u64>().map_err(|_| {
+            format!(
+                "invalid FORGEKV_HEAP_RELEASE_INTERVAL '{}' (expected non-negative integer seconds)",
+                v
+            )
+        })?;
+    }
     if config.compress_on_start && config.value_compression == CompressionMode::Off {
         return Err(
             "FORGEKV_COMPRESS_ON_START=on requires value compression to be enabled (FORGEKV_VALUE_COMPRESSION=zstd)"
@@ -571,6 +619,33 @@ pub fn parse_memory_size(s: &str) -> u64 {
 mod env_tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn memtable_cap_and_heap_release_env() {
+        let mut c = ServerConfig::default();
+        run(&mut c, &[]).unwrap();
+        assert_eq!(c.memtable_max_bytes, 0);
+        assert!(!c.heap_release);
+        run(
+            &mut c,
+            &[
+                ("FORGEKV_MEMTABLE_MAX_BYTES", "512mb"),
+                ("FORGEKV_HEAP_RELEASE", "trim"),
+                ("FORGEKV_HEAP_RELEASE_INTERVAL", "30"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.memtable_max_bytes, 512 * 1024 * 1024);
+        assert!(c.heap_release);
+        assert_eq!(c.heap_release_interval_secs, 30);
+        let mut c = ServerConfig::default();
+        assert!(run(&mut c, &[("FORGEKV_MEMTABLE_MAX_BYTES", "1mb")]).is_err());
+        assert!(run(&mut c, &[("FORGEKV_MEMTABLE_MAX_BYTES", "lots")]).is_err());
+        assert!(run(&mut c, &[("FORGEKV_HEAP_RELEASE", "maybe")]).is_err());
+        assert!(run(&mut c, &[("FORGEKV_HEAP_RELEASE_INTERVAL", "-1")]).is_err());
+        run(&mut c, &[("FORGEKV_MEMTABLE_MAX_BYTES", "0")]).unwrap();
+        assert_eq!(c.memtable_max_bytes, 0);
+    }
 
     fn run(cfg: &mut ServerConfig, pairs: &[(&str, &str)]) -> Result<(), String> {
         let m: HashMap<String, String> = pairs

@@ -229,14 +229,20 @@ impl Compaction {
         }
         // Drain while work remains, but bound iterations so writers aren't starved
         // of disk bandwidth. Prefer shorter bursts under write load.
+        let mut any_work = false;
         for _ in 0..4 {
             let did_work = self.compact_once();
             if !did_work {
                 break;
             }
+            any_work = true;
         }
         self.auto_sweep();
         self.compacting.store(false, Ordering::SeqCst);
+        if any_work {
+            // Merges materialise whole input files in a BTreeMap; return those pages.
+            crate::heap::request_release();
+        }
     }
 
     /// Ask the compaction thread to run soon (non-blocking).

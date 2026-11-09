@@ -463,6 +463,7 @@ impl CommandHandler for InfoCommand {
                 },
                 policy = self.config.max_memory_policy.as_str(),
             ));
+            output.push_str(&crate::heap::info_lines());
         }
 
         // Persistence section
@@ -504,7 +505,10 @@ impl CommandHandler for InfoCommand {
                 lsm_compacting:{compacting}\r\n\
                 lsm_l0_files:{l0}\r\n\
                 lsm_total_sst_files:{ssts}\r\n\
-                lsm_memtable_shard_bytes:{mt}\r\n",
+                lsm_memtable_shard_bytes:{mt}\r\n\
+                lsm_memtable_budget_bytes:{mtb}\r\n\
+                lsm_memtable_bytes:{mtu}\r\n\
+                lsm_memtable_entries:{mte}\r\n",
                 ts = start_ts,
                 wal = match self.config.wal_sync_mode {
                     crate::config::WalSyncMode::Always => "always",
@@ -520,6 +524,9 @@ impl CommandHandler for InfoCommand {
                 l0 = lsm.l0_files,
                 ssts = lsm.total_sst_files,
                 mt = lsm.memtable_shard_bytes,
+                mtb = lsm.memtable_budget_bytes,
+                mtu = lsm.memtable_bytes,
+                mte = lsm.memtable_entries,
             ));
             // SST reader-cache health: deleted-but-mapped files hold disk space until unmapped.
             // The /proc/self/maps scan is cached for up to 10 s (age reported below).
@@ -2020,7 +2027,11 @@ impl CommandHandler for MemoryCommand {
                 command referring to the documentation at http://redis.io/topics/memory-optimization."
             ),
             Some("MALLOC-STATS") => RespValue::bulk_str("jemalloc stats: N/A"),
-            Some("PURGE") => RespValue::ok(),
+            Some("PURGE") => {
+                // Return free heap pages to the OS (malloc_trim / jemalloc arena purge).
+                let _ = crate::heap::release_now();
+                RespValue::ok()
+            }
             Some("STATS") => {
                 RespValue::Array(Some(vec![
                     RespValue::bulk_str("peak.allocated"),
