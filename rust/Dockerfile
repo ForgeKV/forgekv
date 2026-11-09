@@ -3,7 +3,7 @@ FROM rust:1-bookworm AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
-RUN cargo build --release --features lua
+RUN cargo build --release --features lua,jemalloc
 
 FROM debian:bookworm-slim
 WORKDIR /app

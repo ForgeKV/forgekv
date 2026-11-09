@@ -39,6 +39,7 @@ pub fn start(enabled: bool, interval_secs: u64) {
     if !enabled {
         return;
     }
+    tune_allocator();
     std::thread::Builder::new()
         .name("forgekv-heap".into())
         .spawn(move || {
@@ -75,6 +76,21 @@ pub fn release_now() -> (u64, Duration) {
     TOTAL_RELEASED_BYTES.fetch_add(released, Ordering::Relaxed);
     (released, took)
 }
+
+/// glibc: grow/shrink the heap in 64 MiB steps instead of 128 KiB. After a trim hands pages
+/// back, a heavy command re-grows the heap; with the default pad that is tens of thousands of
+/// brk/mprotect calls, each taking the process-wide mmap write lock and stalling every thread
+/// that page-faults on the mmapped SSTs. Allocations of 32 MiB+ still use mmap directly.
+#[cfg(all(not(feature = "jemalloc"), target_os = "linux", target_env = "gnu"))]
+fn tune_allocator() {
+    unsafe {
+        libc::mallopt(libc::M_TOP_PAD, 64 << 20);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 32 << 20);
+    }
+}
+
+#[cfg(not(all(not(feature = "jemalloc"), target_os = "linux", target_env = "gnu")))]
+fn tune_allocator() {}
 
 #[cfg(feature = "jemalloc")]
 fn trim() {
